@@ -336,6 +336,13 @@ def mode_backtest():
     backtest.run_backtest()
 
 
+def mode_backtest_gamelevel():
+    """Run game-level backtesting via Statcast data."""
+    print("[main] === Game-Level Backtest ===")
+    from backtest import run_game_level_backtest
+    run_game_level_backtest(years=[2024])
+
+
 def mode_dry_run():
     """Full pipeline, no Telegram send, print to console."""
     print("[main] === Dry Run ===")
@@ -351,6 +358,7 @@ MODES = {
     "followup": mode_followup,
     "lineup_check": mode_lineup_check,
     "backtest": mode_backtest,
+    "backtest_gamelevel": mode_backtest_gamelevel,
     "dry_run": mode_dry_run,
 }
 

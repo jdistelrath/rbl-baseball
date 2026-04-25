@@ -2,11 +2,14 @@
 Module 6: Backtest.
 Walk-forward validation harness. Run manually only -- not on cron.
 
-Usage: python main.py backtest
+Usage:
+    python main.py backtest            # season-level (fast)
+    python main.py backtest_gamelevel  # game-level via Statcast (slow, ~15-30 min)
 """
 
 import json
 import math
+import os
 from datetime import date, datetime
 
 import numpy as np
@@ -353,3 +356,288 @@ def run_backtest():
     print("[backtest] Done.")
 
     return results
+
+
+# ---------------------------------------------------------------------------
+# Game-Level Backtest (Statcast)
+# ---------------------------------------------------------------------------
+
+def _fetch_game_level_hr_data(year):
+    """
+    Pull Statcast pitch data for a season, aggregate to batter-game level.
+    Returns DataFrame: game_date, batter_id, batter_name, home_team, away_team, homered
+    """
+    from pybaseball import statcast
+    from data_fetcher import _load_cache, _save_cache
+
+    cache_key = f"statcast_gamelevel_{year}"
+    cached = _load_cache(cache_key)
+    if cached is not None:
+        print(f"[backtest_gl] Using cached game-level data for {year}")
+        return cached
+
+    months = [
+        (f"{year}-03-20", f"{year}-03-31"),
+        (f"{year}-04-01", f"{year}-04-30"),
+        (f"{year}-05-01", f"{year}-05-31"),
+        (f"{year}-06-01", f"{year}-06-30"),
+        (f"{year}-07-01", f"{year}-07-31"),
+        (f"{year}-08-01", f"{year}-08-31"),
+        (f"{year}-09-01", f"{year}-09-30"),
+        (f"{year}-10-01", f"{year}-10-06"),
+    ]
+
+    dfs = []
+    for start, end in months:
+        print(f"  Fetching {start} to {end}...")
+        try:
+            chunk = statcast(start_dt=start, end_dt=end)
+            if chunk is not None and not chunk.empty:
+                dfs.append(chunk)
+        except Exception as e:
+            print(f"  Warning: {e}")
+            continue
+
+    if not dfs:
+        return pd.DataFrame()
+
+    raw = pd.concat(dfs, ignore_index=True)
+    print(f"[backtest_gl] Total pitches fetched: {len(raw)}")
+
+    # Filter to rows that have an event (end of PA)
+    pa_rows = raw[raw["events"].notna()].copy()
+    pa_rows["homered"] = pa_rows["events"] == "home_run"
+
+    # Aggregate to batter-game level
+    game_level = pa_rows.groupby(
+        ["game_date", "batter", "home_team", "away_team"]
+    ).agg(
+        homered=("homered", "any"),
+        batter_name=("player_name", "first"),
+        n_pa=("events", "count"),
+    ).reset_index()
+
+    game_level.rename(columns={"batter": "batter_id"}, inplace=True)
+    game_level["homered"] = game_level["homered"].astype(bool)
+
+    print(f"[backtest_gl] Aggregated to {len(game_level)} batter-game rows, "
+          f"{game_level['homered'].sum()} HR events")
+
+    _save_cache(cache_key, game_level)
+    return game_level
+
+
+def _find_batter_in_stats(batter_name_lastfirst, batter_id, batter_df):
+    """
+    Find a batter row in the stats DataFrame.
+    Statcast uses 'Last, First' format; stats df uses 'First Last'.
+    """
+    if batter_df.empty:
+        return None
+
+    name_col = "Name" if "Name" in batter_df.columns else None
+    if name_col is None:
+        return None
+
+    # Convert "Last, First" to "First Last"
+    if isinstance(batter_name_lastfirst, str) and ", " in batter_name_lastfirst:
+        parts = batter_name_lastfirst.split(", ", 1)
+        search_name = f"{parts[1]} {parts[0]}"
+    else:
+        search_name = str(batter_name_lastfirst)
+
+    # Try exact match
+    rows = batter_df[batter_df[name_col] == search_name]
+    if not rows.empty:
+        return rows.iloc[0]
+
+    # Try mlbID match
+    if "mlbID" in batter_df.columns and batter_id:
+        rows = batter_df[batter_df["mlbID"] == int(batter_id)]
+        if not rows.empty:
+            return rows.iloc[0]
+
+    # Try last name match
+    last_name = search_name.split()[-1] if search_name else ""
+    if last_name:
+        rows = batter_df[batter_df[name_col].str.contains(last_name, na=False)]
+        if len(rows) == 1:
+            return rows.iloc[0]
+
+    return None
+
+
+def run_game_level_backtest(years=None):
+    """
+    Game-level backtest using Statcast pitch data.
+    For each batter-game in the year:
+      1. Look up batter's prior-year season stats (no lookahead)
+      2. Build features and score using the model
+      3. Compare to actual HR outcome
+      4. Track ROI by confidence tier
+    """
+    if years is None:
+        years = [2024]
+
+    from data_fetcher import get_batter_statcast, get_pitcher_statcast
+
+    BET_SIZES = {"STRONG": 10.0, "STANDARD": 5.0, "SPECULATIVE": 1.0}
+    PAYOUT = 2.0  # single-leg binary payout for ROI tracking
+
+    results = {
+        tier: {"bets": 0, "wins": 0, "wagered": 0.0, "returned": 0.0}
+        for tier in BET_SIZES
+    }
+    total_scored = 0
+
+    for year in years:
+        print(f"\n[backtest_gl] === Processing {year} ===")
+
+        # Fetch game-level HR data
+        game_data = _fetch_game_level_hr_data(year)
+        if game_data.empty:
+            print(f"[backtest_gl] No data for {year}, skipping.")
+            continue
+
+        # Load prior year stats to avoid lookahead bias
+        print(f"[backtest_gl] Loading {year-1} season stats for features...")
+        batter_stats = get_batter_statcast(season=year - 1)
+        pitcher_stats = get_pitcher_statcast(season=year - 1)
+
+        if batter_stats.empty:
+            print(f"[backtest_gl] No batter stats for {year-1}, skipping.")
+            continue
+
+        print(f"[backtest_gl] {len(game_data)} batter-game rows to score...")
+
+        # Build feature dicts for all rows in bulk
+        feature_dicts = []
+        actuals = []
+        skipped = 0
+
+        for _, row in game_data.iterrows():
+            b_row = _find_batter_in_stats(
+                row.get("batter_name", ""), row.get("batter_id"), batter_stats
+            )
+            if b_row is None:
+                skipped += 1
+                continue
+
+            feats = _extract_batter_features(b_row)
+
+            # Use league-average pitcher features (no per-game matchup in bulk mode)
+            feats["pitcher_hr_fb"] = 0.11
+            feats["pitcher_fly_ball_rate"] = 0.34
+            feats["pitcher_xfip"] = 4.20
+            feats["pitcher_hard_hit_allowed"] = 0.35
+
+            # Neutral context
+            feats["park_hr_factor"] = 1.0
+            feats["wind_bonus"] = 0.0
+            feats["temp_bonus"] = 0.0
+            feats["batting_order_position"] = 0.0
+            feats["platoon_factor"] = 1.0
+
+            # Add identity for the scorer
+            feats["name"] = str(row.get("batter_name", ""))
+            feats["team"] = str(row.get("home_team", ""))
+            feats["opponent_pitcher"] = ""
+            feats["game_id"] = str(row.get("game_date", ""))
+
+            feature_dicts.append(feats)
+            actuals.append(bool(row["homered"]))
+
+        print(f"[backtest_gl] Built features for {len(feature_dicts)} rows "
+              f"(skipped {skipped} unmatched batters)")
+
+        if not feature_dicts:
+            continue
+
+        # Score all batters using the existing scorer
+        from scorer import score_batters
+        scored = score_batters(feature_dicts)
+
+        # Map results back to actuals and track ROI
+        for i, s in enumerate(scored):
+            # scored is sorted by score desc, but we need original order
+            # Actually score_batters sorts — we need to match by index
+            pass
+
+        # Since score_batters sorts, re-match by name+game_id
+        scored_lookup = {}
+        for s in scored:
+            key = (s["name"], s["game_id"])
+            scored_lookup[key] = s
+
+        for i, feats in enumerate(feature_dicts):
+            key = (feats["name"], feats["game_id"])
+            s = scored_lookup.get(key)
+            if s is None:
+                continue
+
+            tier = s["tier"]
+            actual = actuals[i]
+            bet = BET_SIZES[tier]
+
+            results[tier]["bets"] += 1
+            results[tier]["wagered"] += bet
+            if actual:
+                results[tier]["wins"] += 1
+                results[tier]["returned"] += bet * PAYOUT
+
+            total_scored += 1
+
+        print(f"[backtest_gl] Scored {total_scored} batter-game rows for {year}")
+
+    # Calculate final metrics
+    for tier in results:
+        r = results[tier]
+        if r["wagered"] > 0:
+            r["roi_pct"] = round((r["returned"] - r["wagered"]) / r["wagered"] * 100, 1)
+            r["win_rate"] = round(r["wins"] / r["bets"] * 100, 2) if r["bets"] > 0 else 0
+            r["hr_rate"] = round(r["wins"] / r["bets"], 4) if r["bets"] > 0 else 0
+        else:
+            r["roi_pct"] = 0
+            r["win_rate"] = 0
+            r["hr_rate"] = 0
+
+    # Save results
+    def _convert(obj):
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj
+
+    out = {
+        "mode": "game_level",
+        "date": date.today().isoformat(),
+        "years": years,
+        "total_batter_games_scored": total_scored,
+        "results_by_tier": results,
+    }
+
+    CFG.backtest_dir.mkdir(parents=True, exist_ok=True)
+    outpath = CFG.backtest_dir / f"gamelevel_results_{date.today().isoformat()}.json"
+    with open(outpath, "w") as f:
+        json.dump(out, f, indent=2, default=_convert)
+
+    print(f"\n[backtest_gl] Results saved to {outpath}")
+    print("\n=== GAME-LEVEL BACKTEST RESULTS ===")
+    print(f"Total batter-games scored: {total_scored}")
+    for tier, r in results.items():
+        print(f"  {tier}: {r['bets']} bets, "
+              f"{r['win_rate']}% hit rate ({r['wins']}/{r['bets']}), "
+              f"ROI: {r['roi_pct']}%")
+
+    # League avg HR rate for context
+    total_hrs = sum(r["wins"] for r in results.values())
+    total_bets = sum(r["bets"] for r in results.values())
+    if total_bets > 0:
+        print(f"\n  Overall HR rate: {total_hrs}/{total_bets} = "
+              f"{total_hrs/total_bets*100:.2f}%")
+        print(f"  (MLB avg ~3.2% of PA result in HR)")
+
+    return out
