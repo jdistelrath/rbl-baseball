@@ -521,6 +521,162 @@ def get_odds(sport="baseball_mlb", markets="h2h,totals"):
         return {}
 
 
+def get_player_props(market="batter_home_runs"):
+    """
+    Pull player prop lines from The Odds API.
+    market: "batter_home_runs" or "pitcher_strikeouts"
+    Returns list of dicts with player_name, over_line, over_odds, under_odds, etc.
+    Prefers DraftKings, falls back to FanDuel, then others.
+    """
+    if not CFG.odds_api_key or CFG.odds_api_key == "your_odds_api_key_here":
+        return []
+
+    url = (
+        f"https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/"
+        f"?apiKey={CFG.odds_api_key}&regions=us&markets={market}&oddsFormat=american"
+    )
+    try:
+        resp = requests.get(url, timeout=20)
+        resp.raise_for_status()
+        events = resp.json()
+    except Exception as e:
+        print(f"[data_fetcher] Player props fetch failed ({market}): {e}")
+        return []
+
+    from ev_calculator import american_to_implied_prob
+
+    PREFERRED_BOOKS = ["draftkings", "fanduel", "betmgm"]
+    results = []
+
+    for event in events if isinstance(events, list) else []:
+        home_team = event.get("home_team", "")
+        away_team = event.get("away_team", "")
+
+        bookmakers = sorted(
+            event.get("bookmakers", []),
+            key=lambda b: (0 if b.get("key", "") in PREFERRED_BOOKS else 1)
+        )
+
+        seen_players = set()
+
+        for bookmaker in bookmakers:
+            bk_key = bookmaker.get("key", "")
+            for mkt in bookmaker.get("markets", []):
+                if mkt.get("key") != market:
+                    continue
+                outcomes = mkt.get("outcomes", [])
+                for outcome in outcomes:
+                    player = outcome.get("description", outcome.get("name", ""))
+                    side = outcome.get("name", "")
+                    price = outcome.get("price")
+                    line = outcome.get("point")
+
+                    if not player or player in seen_players:
+                        continue
+
+                    if side == "Over" and price is not None and line is not None:
+                        try:
+                            impl_prob = american_to_implied_prob(int(price))
+                        except (ValueError, TypeError):
+                            continue
+
+                        # Find matching under
+                        under_odds = None
+                        for o2 in outcomes:
+                            if (o2.get("description", o2.get("name", "")) == player
+                                    and o2.get("name") == "Under"):
+                                under_odds = o2.get("price")
+
+                        results.append({
+                            "player_name": player,
+                            "home_team": home_team,
+                            "away_team": away_team,
+                            "market": market,
+                            "over_line": line,
+                            "over_odds": int(price),
+                            "under_odds": int(under_odds) if under_odds else None,
+                            "implied_over_prob": round(impl_prob, 4),
+                            "bookmaker": bk_key,
+                        })
+                        seen_players.add(player)
+
+    print(f"[data_fetcher] Pulled {len(results)} {market} prop lines")
+    return results
+
+
+def get_bullpen_stats(season=None):
+    """
+    Pull relief pitcher ERA by team from MLB Stats API.
+    Returns dict: {team_name: bullpen_era}
+    """
+    season = season or date.today().year
+    cache_key = f"bullpen_stats_{season}"
+    cached = _load_cache(cache_key)
+    if cached is not None:
+        return cached
+
+    all_splits = []
+    offset = 0
+    while True:
+        url = (
+            f"https://statsapi.mlb.com/api/v1/stats"
+            f"?stats=season&group=pitching&season={season}&sportId=1"
+            f"&limit=500&offset={offset}"
+        )
+        try:
+            resp = requests.get(url, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            splits = data.get("stats", [{}])[0].get("splits", [])
+            if not splits:
+                break
+            all_splits.extend(splits)
+            if len(splits) < 500:
+                break
+            offset += 500
+        except Exception as e:
+            print(f"[data_fetcher] Bullpen stats page failed at offset {offset}: {e}")
+            break
+
+    # Aggregate: relievers = GS < 5, IP >= 5
+    team_era_weighted = {}
+    team_ip = {}
+
+    for s in all_splits:
+        stat = s.get("stat", {})
+        team_name = s.get("team", {}).get("name", "")
+        gs = int(stat.get("gamesStarted", 0))
+        era = stat.get("era")
+        ip_str = stat.get("inningsPitched", "0")
+
+        if gs > 5 or not team_name or era is None:
+            continue
+        try:
+            era_f = float(era)
+            # Parse IP: "45.1" means 45 + 1/3
+            ip_f = float(ip_str)
+            whole = int(ip_f)
+            frac = ip_f - whole
+            ip_actual = whole + (frac * 10 / 3.0)
+            if ip_actual < 5:
+                continue
+            team_era_weighted.setdefault(team_name, 0.0)
+            team_ip.setdefault(team_name, 0.0)
+            team_era_weighted[team_name] += era_f * ip_actual
+            team_ip[team_name] += ip_actual
+        except (TypeError, ValueError):
+            continue
+
+    result = {}
+    for team in team_era_weighted:
+        if team_ip[team] > 0:
+            result[team] = round(team_era_weighted[team] / team_ip[team], 2)
+
+    print(f"[data_fetcher] Loaded bullpen ERA for {len(result)} teams ({season})")
+    _save_cache(cache_key, result)
+    return result
+
+
 def get_odds_for_markets(sport="baseball_mlb", markets="h2h,totals,spreads"):
     """
     Pull odds for MLB games from The Odds API.

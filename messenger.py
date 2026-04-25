@@ -200,6 +200,65 @@ def send_top_ev_plays(plays, dry_run=False):
     return _send_telegram(text)
 
 
+def send_ev_props(hr_props, k_props, dry_run=False):
+    """
+    Send +EV straight bet recommendations for DraftKings.
+    Only sends if there are actual +EV plays.
+    """
+    if not hr_props and not k_props:
+        return False
+
+    today = date.today().strftime("%B %d, %Y")
+    lines = [f"\u26be DK +EV PROPS \u2014 {today}", ""]
+
+    if hr_props:
+        lines.append("\U0001f4b0 HR PROPS (straight bets)")
+        for p in hr_props[:5]:
+            name = p.get("player_name", "")
+            mp = p.get("model_prob", 0)
+            ip = p.get("implied_prob", 0)
+            odds = p.get("over_odds", 0)
+            bet = p.get("suggested_bet", 1)
+            edge_str = p.get("key_edge", "")
+            lines.append(
+                f"  \u2022 {name} +EV: model {mp:.0%} vs book {ip:.0%} "
+                f"\u2192 {odds:+d} | ${bet:.0f}"
+            )
+            if edge_str:
+                lines.append(f"    {edge_str}")
+        lines.append("")
+
+    if k_props:
+        lines.append("\u26a1 K PROPS")
+        for p in k_props[:3]:
+            pitcher = p.get("pitcher_name", "")
+            side = p.get("best_side", "over").upper()
+            bline = p.get("book_line", 0)
+            odds = p.get("over_odds", 0) if p.get("best_side") == "over" else p.get("under_odds", 0)
+            bet = p.get("suggested_bet", 1)
+            factors = p.get("key_factors", [])
+            lines.append(
+                f"  \u2022 {pitcher} {side} {bline} Ks \u2192 {odds:+d} | ${bet:.0f}"
+            )
+            if factors:
+                lines.append(f"    {'; '.join(factors)}")
+        lines.append("")
+
+    lines.append("Only bet when model edge > 3%.")
+
+    text = "\n".join(lines)
+
+    if dry_run:
+        _safe_print("=" * 60)
+        _safe_print("DRY RUN - DK +EV Props")
+        _safe_print("=" * 60)
+        _safe_print(text)
+        _safe_print("=" * 60)
+        return True
+
+    return _send_telegram(text)
+
+
 def send_error(msg, dry_run=False):
     """Send an error alert via Telegram."""
     text = f"\u26a0\ufe0f HR Model Error\n\n{msg}"

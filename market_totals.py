@@ -214,6 +214,16 @@ def score_game_total(game, batter_df, pitcher_df, weather, odds_lookup,
 
     pitcher_adj = ((home_fip - 4.20) + (away_fip - 4.20)) * w["pitcher_fip_weight"]
 
+    # Bullpen ERA adjustment (less impact than starter, ~0.3 per 1.0 ERA above avg)
+    try:
+        import data_fetcher as _df
+        bullpen_stats = _df.get_bullpen_stats()
+    except Exception:
+        bullpen_stats = {}
+    home_bp_era = bullpen_stats.get(home, 4.20)
+    away_bp_era = bullpen_stats.get(away, 4.20)
+    bullpen_adj = ((home_bp_era - 4.20) + (away_bp_era - 4.20)) * 0.3
+
     # Team offense adjustment (wRC+ based: 100 = league avg)
     home_wrc = _find_team_wrc_plus(home, batter_df)
     away_wrc = _find_team_wrc_plus(away, batter_df)
@@ -226,7 +236,7 @@ def score_game_total(game, batter_df, pitcher_df, weather, odds_lookup,
     # Weather adjustment
     weather_adj = _weather_run_adjustment(weather, weights=w)
 
-    model_total = _BASE_RUNS + pitcher_adj + offense_adj + park_adj + weather_adj
+    model_total = _BASE_RUNS + pitcher_adj + bullpen_adj + offense_adj + park_adj + weather_adj
 
     # Get odds from lookup
     book_line, over_odds, under_odds = _extract_totals_odds(game, odds_lookup)
@@ -248,7 +258,8 @@ def score_game_total(game, batter_df, pitcher_df, weather, odds_lookup,
             "suggested_bet": 0.0,
             "key_factors": _build_factors(home_fip, away_fip, park_rf, weather,
                                           game.get("home_pitcher_name", "TBD"),
-                                          game.get("away_pitcher_name", "TBD")),
+                                          game.get("away_pitcher_name", "TBD"),
+                                          home_bp_era, away_bp_era),
             "description": f"{away} @ {home} total",
         }
 
@@ -275,7 +286,8 @@ def score_game_total(game, batter_df, pitcher_df, weather, odds_lookup,
 
     factors = _build_factors(home_fip, away_fip, park_rf, weather,
                              game.get("home_pitcher_name", "TBD"),
-                             game.get("away_pitcher_name", "TBD"))
+                             game.get("away_pitcher_name", "TBD"),
+                             home_bp_era, away_bp_era)
 
     return {
         "market": "TOTAL",
@@ -346,7 +358,8 @@ def _teams_match(event, home, away):
     return (home in eh or eh in home) and (away in ea or ea in away)
 
 
-def _build_factors(home_fip, away_fip, park_rf, weather, home_pitcher, away_pitcher):
+def _build_factors(home_fip, away_fip, park_rf, weather, home_pitcher, away_pitcher,
+                   home_bp_era=4.20, away_bp_era=4.20):
     """Build 2-3 key factor strings."""
     factors = []
     avg_fip = (home_fip + away_fip) / 2.0
@@ -354,6 +367,12 @@ def _build_factors(home_fip, away_fip, park_rf, weather, home_pitcher, away_pitc
         factors.append(f"weak pitching ({home_pitcher} {home_fip:.2f} / {away_pitcher} {away_fip:.2f} FIP)")
     elif avg_fip < 3.80:
         factors.append(f"strong pitching ({home_pitcher} {home_fip:.2f} / {away_pitcher} {away_fip:.2f} FIP)")
+
+    avg_bp = (home_bp_era + away_bp_era) / 2.0
+    if avg_bp > 4.80:
+        factors.append(f"weak bullpens (avg ERA {avg_bp:.2f})")
+    elif avg_bp < 3.50:
+        factors.append(f"strong bullpens (avg ERA {avg_bp:.2f})")
 
     if park_rf >= 1.05:
         factors.append(f"hitter-friendly park (RF {park_rf:.2f})")

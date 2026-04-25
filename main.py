@@ -23,6 +23,8 @@ import messenger
 import market_totals
 import market_f5
 import market_strikeouts
+import market_hr_ev
+import market_k_ev
 
 
 # ---------------------------------------------------------------------------
@@ -105,6 +107,7 @@ def _run_pipeline(games, dry_run=False):
     # Build stacks
     parcels = stack_builder.build_stacks(scored)
     parcels["_confirmed_game_ids"] = confirmed_game_ids
+    parcels["_scored_batters"] = scored
 
     print(f"[main] Sharp parlay: {len(parcels['sharp_parlay'])} legs")
     print(f"[main] Lottery parlay: {len(parcels['lottery_parlay'])} legs")
@@ -186,6 +189,54 @@ def _run_ev_pipeline(games, dry_run=False):
 
 
 # ---------------------------------------------------------------------------
+# DK Prop EV pipeline
+# ---------------------------------------------------------------------------
+
+def _run_prop_ev_pipeline(games, parcels, dry_run=False):
+    """
+    Pull DK player prop lines, compare to model, surface +EV bets.
+    """
+    print("[main] === DK Prop EV Pipeline ===")
+
+    scored_batters = parcels.get("_scored_batters", []) if parcels else []
+
+    # Pull prop lines
+    hr_prop_lines = data_fetcher.get_player_props("batter_home_runs")
+    k_prop_lines = data_fetcher.get_player_props("pitcher_strikeouts")
+
+    # HR prop EV
+    hr_ev_plays = []
+    if scored_batters and hr_prop_lines:
+        hr_ev_plays = market_hr_ev.score_hr_props(scored_batters, hr_prop_lines)
+        print(f"[main] HR +EV plays: {len(hr_ev_plays)}")
+    else:
+        print("[main] No HR prop lines or scored batters available.")
+
+    # K prop EV
+    k_ev_plays = []
+    if games and k_prop_lines:
+        batter_df = data_fetcher.get_batter_statcast()
+        pitcher_df = data_fetcher.get_pitcher_statcast()
+        weather_map = {}
+        for g in games:
+            stadium = g.get("stadium", "")
+            if stadium and stadium not in weather_map:
+                weather_map[stadium] = data_fetcher.get_weather(stadium, None)
+        k_ev_plays = market_k_ev.score_k_props(
+            games, pitcher_df, batter_df, weather_map, k_prop_lines
+        )
+        print(f"[main] K +EV plays: {len(k_ev_plays)}")
+    else:
+        print("[main] No K prop lines available.")
+
+    # Send/print
+    if hr_ev_plays or k_ev_plays:
+        messenger.send_ev_props(hr_ev_plays[:5], k_ev_plays[:3], dry_run=dry_run)
+
+    return hr_ev_plays, k_ev_plays
+
+
+# ---------------------------------------------------------------------------
 # Modes
 # ---------------------------------------------------------------------------
 
@@ -226,6 +277,12 @@ def mode_morning_brief(dry_run=False):
             messenger.send_top_ev_plays(top_ev, dry_run=dry_run)
     except Exception as e:
         print(f"[main] EV pipeline error (non-fatal): {e}")
+
+    # Run DK prop EV pipeline (HR + K props vs book lines)
+    try:
+        _run_prop_ev_pipeline(games, parcels, dry_run=dry_run)
+    except Exception as e:
+        print(f"[main] Prop EV pipeline error (non-fatal): {e}")
 
     # Update state
     state = _load_state()
@@ -340,14 +397,14 @@ def mode_backtest_gamelevel():
     """Run game-level backtesting via Statcast data."""
     print("[main] === Game-Level Backtest ===")
     from backtest import run_game_level_backtest
-    run_game_level_backtest(years=[2024])
+    run_game_level_backtest(years=[2024, 2025])
 
 
 def mode_backtest_totals():
     """Run totals model backtesting and calibration."""
     print("[main] === Totals Outcome Backtest ===")
     from backtest import run_totals_backtest
-    run_totals_backtest(years=[2021, 2022, 2023, 2024])
+    run_totals_backtest(years=[2021, 2022, 2023, 2024, 2025])
 
 
 def mode_dry_run():
