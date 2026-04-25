@@ -1,0 +1,7 @@
+cache/
+state/
+outputs/
+.env
+__pycache__/
+*.pyc
+*.pkl

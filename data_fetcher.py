@@ -1,0 +1,394 @@
+"""
+Module 2: Data Fetcher.
+All network I/O lives here. Other modules never make HTTP calls.
+"""
+
+import pickle
+import math
+from datetime import datetime, date
+from pathlib import Path
+
+import pandas as pd
+import requests
+
+from config import CFG
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def _today_str():
+    return date.today().isoformat()
+
+
+def _cache_path(name):
+    return CFG.cache_dir / f"{name}_{_today_str()}.pkl"
+
+
+def _load_cache(name):
+    p = _cache_path(name)
+    if p.exists():
+        with open(p, "rb") as f:
+            return pickle.load(f)
+    return None
+
+
+def _save_cache(name, obj):
+    p = _cache_path(name)
+    with open(p, "wb") as f:
+        pickle.dump(obj, f)
+
+
+# ---------------------------------------------------------------------------
+# MLB Stats API
+# ---------------------------------------------------------------------------
+
+def get_today_schedule(target_date=None):
+    """
+    Returns list of dicts:
+      {game_id, home_team, away_team, start_time_et, stadium, home_pitcher_id,
+       away_pitcher_id, home_pitcher_name, away_pitcher_name}
+    """
+    dt = target_date or _today_str()
+    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&date={dt}&hydrate=probablePitcher,venue,linescore"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"[data_fetcher] Schedule fetch failed: {e}")
+        return []
+
+    games = []
+    for d in data.get("dates", []):
+        for g in d.get("games", []):
+            game_id = g["gamePk"]
+            home = g["teams"]["home"]["team"]["name"]
+            away = g["teams"]["away"]["team"]["name"]
+            venue = g.get("venue", {}).get("name", "Unknown")
+            game_date = g.get("gameDate", "")  # UTC ISO
+
+            # Probable pitchers
+            hp = g["teams"]["home"].get("probablePitcher", {})
+            ap = g["teams"]["away"].get("probablePitcher", {})
+
+            games.append({
+                "game_id": game_id,
+                "home_team": home,
+                "away_team": away,
+                "start_time_utc": game_date,
+                "stadium": venue,
+                "home_pitcher_id": hp.get("id"),
+                "away_pitcher_id": ap.get("id"),
+                "home_pitcher_name": hp.get("fullName", "TBD"),
+                "away_pitcher_name": ap.get("fullName", "TBD"),
+            })
+    return games
+
+
+def get_confirmed_lineups(game_id):
+    """
+    Returns {home: [{id, name, batting_order, position, bat_side}], away: [...]}
+    or None if lineups not yet posted.
+    """
+    url = f"https://statsapi.mlb.com/api/v1/game/{game_id}/boxscore"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"[data_fetcher] Boxscore fetch failed for {game_id}: {e}")
+        return None
+
+    result = {}
+    for side in ("home", "away"):
+        team_data = data.get("teams", {}).get(side, {})
+        batting_order = team_data.get("battingOrder", [])
+        if not batting_order:
+            return None  # Lineups not posted yet
+
+        players_data = team_data.get("players", {})
+        players = []
+        for i, pid in enumerate(batting_order):
+            pkey = f"ID{pid}"
+            pinfo = players_data.get(pkey, {})
+            person = pinfo.get("person", {})
+            bat_side = pinfo.get("batSide", {}).get("code", "R")
+            players.append({
+                "id": pid,
+                "name": person.get("fullName", f"Player {pid}"),
+                "batting_order": i + 1,
+                "position": pinfo.get("position", {}).get("abbreviation", ""),
+                "bat_side": bat_side,
+            })
+        result[side] = players
+    return result
+
+
+def get_probable_pitchers(game_id):
+    """Returns {home_pitcher_id, away_pitcher_id} from schedule endpoint."""
+    url = f"https://statsapi.mlb.com/api/v1/schedule?sportId=1&gamePk={game_id}&hydrate=probablePitcher"
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"[data_fetcher] Probable pitchers fetch failed for {game_id}: {e}")
+        return None
+
+    for d in data.get("dates", []):
+        for g in d.get("games", []):
+            if g["gamePk"] == game_id:
+                hp = g["teams"]["home"].get("probablePitcher", {})
+                ap = g["teams"]["away"].get("probablePitcher", {})
+                return {
+                    "home_pitcher_id": hp.get("id"),
+                    "away_pitcher_id": ap.get("id"),
+                    "home_pitcher_name": hp.get("fullName", "TBD"),
+                    "away_pitcher_name": ap.get("fullName", "TBD"),
+                    "home_pitcher_throws": hp.get("pitchHand", {}).get("code", "R"),
+                    "away_pitcher_throws": ap.get("pitchHand", {}).get("code", "R"),
+                }
+    return None
+
+
+def _get_pitcher_hand(pitcher_id):
+    """Fetch pitcher throwing hand from MLB people endpoint."""
+    if not pitcher_id:
+        return "R"
+    url = f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}"
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        people = data.get("people", [])
+        if people:
+            return people[0].get("pitchHand", {}).get("code", "R")
+    except Exception:
+        pass
+    return "R"
+
+
+# ---------------------------------------------------------------------------
+# Statcast / pybaseball
+# ---------------------------------------------------------------------------
+
+def get_batter_statcast(season=None):
+    """
+    Returns DataFrame of batter stats for the given season (or current year).
+    Cached once per day.
+    Uses pybaseball.batting_stats() for FanGraphs data.
+    """
+    season = season or date.today().year
+    cache_key = f"statcast_batters_{season}"
+    cached = _load_cache(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        from pybaseball import batting_stats
+        df = batting_stats(season, qual=50)
+        _save_cache(cache_key, df)
+        return df
+    except Exception as e:
+        print(f"[data_fetcher] Batter statcast fetch failed: {e}")
+        return pd.DataFrame()
+
+
+def get_pitcher_statcast(season=None):
+    """
+    Returns DataFrame of pitcher stats for the given season.
+    Cached once per day.
+    """
+    season = season or date.today().year
+    cache_key = f"statcast_pitchers_{season}"
+    cached = _load_cache(cache_key)
+    if cached is not None:
+        return cached
+
+    try:
+        from pybaseball import pitching_stats
+        df = pitching_stats(season, qual=20)
+        _save_cache(cache_key, df)
+        return df
+    except Exception as e:
+        print(f"[data_fetcher] Pitcher statcast fetch failed: {e}")
+        return pd.DataFrame()
+
+
+# ---------------------------------------------------------------------------
+# Weather (OpenWeatherMap)
+# ---------------------------------------------------------------------------
+
+def get_weather(stadium_name, game_time_utc=None):
+    """
+    Returns {temp_f, wind_speed_mph, wind_dir_degrees, wind_dir_label}
+    Falls back to neutral defaults if API key missing or call fails.
+    """
+    neutral = {
+        "temp_f": 70.0,
+        "wind_speed_mph": 0.0,
+        "wind_dir_degrees": 0,
+        "wind_dir_label": "calm",
+    }
+
+    if not CFG.owm_api_key or CFG.owm_api_key == "your_openweathermap_key_here":
+        return neutral
+
+    coords = CFG.get_stadium_coords(stadium_name)
+    if not coords:
+        return neutral
+
+    lat, lon = coords
+    url = (
+        f"https://api.openweathermap.org/data/2.5/weather"
+        f"?lat={lat}&lon={lon}&appid={CFG.owm_api_key}&units=imperial"
+    )
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        wind = data.get("wind", {})
+        main = data.get("main", {})
+
+        wind_deg = wind.get("deg", 0)
+        return {
+            "temp_f": main.get("temp", 70.0),
+            "wind_speed_mph": wind.get("speed", 0.0),
+            "wind_dir_degrees": wind_deg,
+            "wind_dir_label": _deg_to_label(wind_deg),
+        }
+    except Exception as e:
+        print(f"[data_fetcher] Weather fetch failed for {stadium_name}: {e}")
+        return neutral
+
+
+def _deg_to_label(deg):
+    dirs = ["N", "NNE", "NE", "ENE", "E", "ESE", "SE", "SSE",
+            "S", "SSW", "SW", "WSW", "W", "WNW", "NW", "NNW"]
+    idx = round(deg / 22.5) % 16
+    return dirs[idx]
+
+
+# ---------------------------------------------------------------------------
+# Park Factors
+# ---------------------------------------------------------------------------
+
+def get_park_factors(season=None):
+    """
+    Returns DataFrame of park factors. Tries pybaseball first,
+    falls back to a sensible default set.
+    Cached once per day.
+    """
+    season = season or date.today().year
+    cache_key = f"park_factors_{season}"
+    cached = _load_cache(cache_key)
+    if cached is not None:
+        return cached
+
+    # Try pybaseball's park factors if available
+    try:
+        from pybaseball import team_batting
+        # team_batting doesn't have park factors directly, so we use a fallback
+        raise ImportError("Use fallback")
+    except Exception:
+        pass
+
+    # Fallback: hard-coded park HR factors (FanGraphs-derived, approximate)
+    # Values >100 = hitter-friendly, <100 = pitcher-friendly, normalized to 1.0 scale
+    park_factors = {
+        "Coors Field": 1.38,
+        "Great American Ball Park": 1.18,
+        "Yankee Stadium": 1.15,
+        "Globe Life Field": 1.12,
+        "Citizens Bank Park": 1.10,
+        "Wrigley Field": 1.08,
+        "Fenway Park": 1.07,
+        "Guaranteed Rate Field": 1.06,
+        "Minute Maid Park": 1.05,
+        "Dodger Stadium": 1.04,
+        "Truist Park": 1.03,
+        "Rogers Centre": 1.03,
+        "Angel Stadium": 1.02,
+        "Oriole Park at Camden Yards": 1.02,
+        "Target Field": 1.01,
+        "Citi Field": 1.00,
+        "PNC Park": 0.99,
+        "American Family Field": 0.99,
+        "Busch Stadium": 0.98,
+        "Comerica Park": 0.97,
+        "Chase Field": 0.97,
+        "Progressive Field": 0.96,
+        "Kauffman Stadium": 0.96,
+        "T-Mobile Park": 0.95,
+        "Nationals Park": 0.95,
+        "loanDepot park": 0.94,
+        "Petco Park": 0.93,
+        "Oracle Park": 0.90,
+        "Tropicana Field": 0.92,
+        "Oakland Coliseum": 0.88,
+        "RingCentral Coliseum": 0.88,
+    }
+    df = pd.DataFrame(
+        [{"stadium": k, "hr_factor": v} for k, v in park_factors.items()]
+    )
+    _save_cache(cache_key, df)
+    return df
+
+
+def get_park_factor_for_stadium(stadium_name, season=None):
+    """Returns HR park factor float for a given stadium name."""
+    df = get_park_factors(season)
+    match = df[df["stadium"] == stadium_name]
+    if not match.empty:
+        return float(match.iloc[0]["hr_factor"])
+    return 1.0  # neutral default
+
+
+# ---------------------------------------------------------------------------
+# Odds (The Odds API) - optional
+# ---------------------------------------------------------------------------
+
+def get_odds(sport="baseball_mlb", markets="h2h,totals"):
+    """
+    Returns odds data dict. Skips gracefully if API key not set.
+    """
+    if not CFG.odds_api_key or CFG.odds_api_key == "your_odds_api_key_here":
+        return {}
+
+    url = (
+        f"https://api.the-odds-api.com/v4/sports/{sport}/odds/"
+        f"?apiKey={CFG.odds_api_key}&regions=us&markets={markets}"
+    )
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        print(f"[data_fetcher] Odds fetch failed: {e}")
+        return {}
+
+
+def get_odds_for_markets(sport="baseball_mlb", markets="h2h,totals,spreads"):
+    """
+    Pull odds for MLB games from The Odds API.
+    Returns the raw list of events with nested bookmaker/market data.
+    Gracefully returns [] if API key not set or request fails.
+    """
+    if not CFG.odds_api_key or CFG.odds_api_key == "your_odds_api_key_here":
+        return []
+
+    url = (
+        f"https://api.the-odds-api.com/v4/sports/{sport}/odds/"
+        f"?apiKey={CFG.odds_api_key}&regions=us&markets={markets}&oddsFormat=american"
+    )
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        data = resp.json()
+        if isinstance(data, list):
+            return data
+        return []
+    except Exception as e:
+        print(f"[data_fetcher] Odds for markets fetch failed: {e}")
+        return []
