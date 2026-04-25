@@ -407,6 +407,21 @@ def mode_backtest_totals():
     run_totals_backtest(years=[2021, 2022, 2023, 2024, 2025])
 
 
+def mode_prop_ev():
+    """Run HR and K prop EV engines against DK lines, print results to stdout."""
+    print("[main] === Prop EV ===")
+    games = data_fetcher.get_today_schedule()
+    if not games:
+        print("[main] No games today.")
+        return
+
+    # Run HR pipeline to get scored batters
+    parcels, confirmed, pending = _run_pipeline(games)
+
+    # Run prop EV pipeline (prints results)
+    _run_prop_ev_pipeline(games, parcels, dry_run=True)
+
+
 def mode_dry_run():
     """Full pipeline, no Telegram send, print to console."""
     print("[main] === Dry Run ===")
@@ -424,6 +439,7 @@ MODES = {
     "backtest": mode_backtest,
     "backtest_gamelevel": mode_backtest_gamelevel,
     "backtest_totals": mode_backtest_totals,
+    "prop_ev": mode_prop_ev,
     "dry_run": mode_dry_run,
 }
 
