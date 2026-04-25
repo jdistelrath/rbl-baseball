@@ -5,6 +5,7 @@ Walk-forward validation harness. Run manually only -- not on cron.
 Usage:
     python main.py backtest            # season-level (fast)
     python main.py backtest_gamelevel  # game-level via Statcast (slow, ~15-30 min)
+    python main.py backtest_totals     # totals model calibration (20-40 min)
 """
 
 import json
@@ -639,5 +640,286 @@ def run_game_level_backtest(years=None):
         print(f"\n  Overall HR rate: {total_hrs}/{total_bets} = "
               f"{total_hrs/total_bets*100:.2f}%")
         print(f"  (MLB avg ~3.2% of PA result in HR)")
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Totals Outcome Backtest
+# ---------------------------------------------------------------------------
+
+def _fetch_season_scores(year):
+    """
+    Fetch all regular-season game scores for a year via MLB Stats API.
+    Returns list of dicts: game_id, home_team, away_team, stadium,
+        home_pitcher_name, away_pitcher_name, home_score, away_score, total_runs
+    Cached per year.
+    """
+    import requests
+    from data_fetcher import _load_cache, _save_cache
+
+    cache_key = f"season_scores_{year}"
+    cached = _load_cache(cache_key)
+    if cached is not None:
+        print(f"[backtest_totals] Using cached scores for {year} ({len(cached)} games)")
+        return cached
+
+    # Pull month by month to avoid timeouts
+    all_games = []
+    for month in range(3, 11):  # March through October
+        start = f"{year}-{month:02d}-01"
+        if month == 10:
+            end = f"{year}-10-10"
+        elif month in (4, 6, 9):
+            end = f"{year}-{month:02d}-30"
+        else:
+            end = f"{year}-{month:02d}-31"
+
+        url = (
+            f"https://statsapi.mlb.com/api/v1/schedule"
+            f"?sportId=1&startDate={start}&endDate={end}"
+            f"&gameType=R&hydrate=linescore,probablePitcher,venue"
+        )
+        try:
+            resp = requests.get(url, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"  Warning: failed to fetch {start} to {end}: {e}")
+            continue
+
+        for d in data.get("dates", []):
+            for g in d.get("games", []):
+                ls = g.get("linescore", {})
+                teams_ls = ls.get("teams", {})
+                home_runs = teams_ls.get("home", {}).get("runs")
+                away_runs = teams_ls.get("away", {}).get("runs")
+
+                if home_runs is None or away_runs is None:
+                    continue  # game not completed
+
+                hp = g["teams"]["home"].get("probablePitcher", {})
+                ap = g["teams"]["away"].get("probablePitcher", {})
+                venue = g.get("venue", {}).get("name", "")
+
+                all_games.append({
+                    "game_id": g["gamePk"],
+                    "home_team": g["teams"]["home"]["team"]["name"],
+                    "away_team": g["teams"]["away"]["team"]["name"],
+                    "stadium": venue,
+                    "home_pitcher_name": hp.get("fullName", "TBD"),
+                    "away_pitcher_name": ap.get("fullName", "TBD"),
+                    "home_score": int(home_runs),
+                    "away_score": int(away_runs),
+                    "total_runs": int(home_runs) + int(away_runs),
+                })
+
+    print(f"[backtest_totals] Fetched {len(all_games)} completed games for {year}")
+    _save_cache(cache_key, all_games)
+    return all_games
+
+
+def _precompute_game_features(games, batter_df, pitcher_df):
+    """
+    Pre-compute raw feature values for each game (expensive lookups done once).
+    Returns list of dicts with: fip_dev, wrc_dev, park_adj, total_runs.
+    The optimizer then just does: base + fip_dev*w1 + wrc_dev*w2 + park_adj.
+    """
+    from market_totals import (
+        _find_pitcher_row, _get_stat, _find_team_wrc_plus,
+        PARK_RUN_FACTORS, _BASE_RUNS,
+    )
+
+    features = []
+    for g in games:
+        hp_row = _find_pitcher_row(g.get("home_pitcher_name"), pitcher_df)
+        ap_row = _find_pitcher_row(g.get("away_pitcher_name"), pitcher_df)
+
+        home_fip = _get_stat(hp_row, ["FIP"], 4.20)
+        away_fip = _get_stat(ap_row, ["FIP"], 4.20)
+        fip_dev = (home_fip - 4.20) + (away_fip - 4.20)
+
+        home_wrc = _find_team_wrc_plus(g.get("home_team", ""), batter_df)
+        away_wrc = _find_team_wrc_plus(g.get("away_team", ""), batter_df)
+        wrc_dev = (home_wrc - 100) + (away_wrc - 100)
+
+        park_rf = PARK_RUN_FACTORS.get(g.get("stadium", ""), 1.0)
+        park_adj = (park_rf - 1.0) * _BASE_RUNS
+
+        features.append({
+            "fip_dev": fip_dev,
+            "wrc_dev": wrc_dev,
+            "park_adj": park_adj,
+            "total_runs": g["total_runs"],
+        })
+
+    return features
+
+
+def _fast_accuracy(features, fip_w, wrc_w, base_runs):
+    """Fast accuracy computation using pre-computed features (no lookups)."""
+    better = 0
+    total = len(features)
+    for f in features:
+        model = base_runs + f["fip_dev"] * fip_w + f["wrc_dev"] * wrc_w + f["park_adj"]
+        actual = f["total_runs"]
+        baseline_err = abs(base_runs - actual)
+        model_err = abs(model - actual)
+        if model_err < baseline_err:
+            better += 1
+    return better, total
+
+
+def run_totals_backtest(years=None):
+    """
+    Totals outcome backtest: test model's prediction accuracy on historical game scores.
+    Uses prior-year stats (no lookahead). Optimizes weights on train years, tests on holdout.
+    """
+    if years is None:
+        years = [2021, 2022, 2023, 2024]
+
+    from data_fetcher import get_batter_statcast, get_pitcher_statcast
+    from market_totals import _BASE_RUNS
+
+    print("[backtest_totals] === Totals Outcome Backtest ===")
+
+    # --- Phase 1: Fetch scores and pre-compute features per year ---
+    year_features = {}  # year -> list of feature dicts
+    year_games_count = {}
+
+    for year in years:
+        print(f"\n[backtest_totals] Processing {year}...")
+        games = _fetch_season_scores(year)
+        if not games:
+            print(f"[backtest_totals] No games for {year}, skipping.")
+            continue
+
+        print(f"  Loading {year-1} stats for model features...")
+        batter_df = get_batter_statcast(season=year - 1)
+        pitcher_df = get_pitcher_statcast(season=year - 1)
+
+        print(f"  Pre-computing features for {len(games)} games...")
+        feats = _precompute_game_features(games, batter_df, pitcher_df)
+        year_features[year] = feats
+        year_games_count[year] = len(feats)
+
+        # Initial accuracy with default weights
+        better, total = _fast_accuracy(feats, 0.5, 0.015, _BASE_RUNS)
+        pct = better / total * 100 if total > 0 else 0
+        print(f"  {year}: {total} games, model beats baseline in {better} ({pct:.1f}%)")
+
+    if not year_features:
+        print("[backtest_totals] No data available. Aborting.")
+        return
+
+    # --- Phase 2: Optimize weights on train set ---
+    train_years = years[:-1]
+    holdout_year = years[-1]
+
+    # Combine train features into one list
+    train_feats = []
+    for y in train_years:
+        if y in year_features:
+            train_feats.extend(year_features[y])
+
+    print(f"\n[backtest_totals] Optimizing on {len(train_feats)} train games "
+          f"({train_years}), holdout: {holdout_year}")
+
+    def _objective(params):
+        better, total = _fast_accuracy(train_feats, params[0], params[1], _BASE_RUNS)
+        return -(better / max(total, 1))
+
+    initial = [0.5, 0.015]
+    result = minimize(_objective, initial, method="Nelder-Mead",
+                      options={"maxiter": 1000, "xatol": 1e-5})
+
+    opt_fip_w = round(float(result.x[0]), 4)
+    opt_wrc_w = round(float(result.x[1]), 6)
+    train_acc = -result.fun * 100
+
+    print(f"[backtest_totals] Optimized train accuracy: {train_acc:.1f}%")
+    print(f"[backtest_totals] Calibrated: pitcher_fip_weight={opt_fip_w}, wrc_weight={opt_wrc_w}")
+
+    optimized = {
+        "pitcher_fip_weight": opt_fip_w,
+        "wrc_weight": opt_wrc_w,
+        "wind_out_bonus": 0.5,
+        "wind_in_penalty": 0.3,
+        "temp_hot_bonus": 0.2,
+        "temp_cold_penalty": 0.4,
+    }
+
+    # --- Phase 3: Score each year with optimized weights ---
+    year_results = {}
+    for year in years:
+        if year not in year_features:
+            continue
+        feats = year_features[year]
+        better, total = _fast_accuracy(feats, opt_fip_w, opt_wrc_w, _BASE_RUNS)
+        pct = better / total * 100 if total > 0 else 0
+        year_results[year] = {
+            "games": total,
+            "model_better_than_baseline": better,
+            "accuracy_pct": round(pct, 1),
+        }
+
+    # --- Save weights ---
+    weights_path = CFG.base_dir / "weights_totals.json"
+    with open(weights_path, "w") as f:
+        json.dump(optimized, f, indent=2)
+    print(f"\n[backtest_totals] Saved calibrated weights to {weights_path}")
+
+    # --- Save full results ---
+    def _convert(obj):
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        return obj
+
+    out = {
+        "mode": "totals_backtest",
+        "date": date.today().isoformat(),
+        "years": years,
+        "train_years": train_years,
+        "holdout_year": holdout_year,
+        "train_accuracy_pct": round(train_acc, 1),
+        "optimized_weights": optimized,
+        "year_results": {str(y): r for y, r in year_results.items()},
+    }
+
+    outpath = CFG.backtest_dir / f"totals_backtest_{date.today().isoformat()}.json"
+    with open(outpath, "w") as f:
+        json.dump(out, f, indent=2, default=_convert)
+
+    # --- Print summary table ---
+    print(f"\n{'='*50}")
+    print("=== TOTALS BACKTEST RESULTS ===")
+    print(f"{'='*50}")
+    print(f"{'Year':<6} {'Games':<7} {'Beats Base':<12} {'Accuracy':<10}")
+    print("-" * 40)
+    total_better_all = 0
+    total_games_all = 0
+    for y in years:
+        if y in year_results:
+            r = year_results[y]
+            g = r["games"]
+            b = r["model_better_than_baseline"]
+            a = r["accuracy_pct"]
+            marker = " <-- holdout" if y == holdout_year else ""
+            total_better_all += b
+            total_games_all += g
+            print(f"{y:<6} {g:<7} {b:<12} {a:.1f}%{marker}")
+
+    overall = total_better_all / total_games_all * 100 if total_games_all > 0 else 0
+    print("-" * 40)
+    print(f"{'Total':<6} {total_games_all:<7} {total_better_all:<12} {overall:.1f}%")
+    print()
+    print(f"Calibrated weights saved to {weights_path}")
+    above54 = overall >= 54.0
+    print(f"Key finding: model {'IS' if above54 else 'is NOT'} above 54% threshold")
+    print(f"[backtest_totals] Done.")
 
     return out

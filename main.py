@@ -343,6 +343,13 @@ def mode_backtest_gamelevel():
     run_game_level_backtest(years=[2024])
 
 
+def mode_backtest_totals():
+    """Run totals model backtesting and calibration."""
+    print("[main] === Totals Outcome Backtest ===")
+    from backtest import run_totals_backtest
+    run_totals_backtest(years=[2021, 2022, 2023, 2024])
+
+
 def mode_dry_run():
     """Full pipeline, no Telegram send, print to console."""
     print("[main] === Dry Run ===")
@@ -359,6 +366,7 @@ MODES = {
     "lineup_check": mode_lineup_check,
     "backtest": mode_backtest,
     "backtest_gamelevel": mode_backtest_gamelevel,
+    "backtest_totals": mode_backtest_totals,
     "dry_run": mode_dry_run,
 }
 

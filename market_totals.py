@@ -3,13 +3,38 @@ Market: Team Totals (over/under on total runs scored).
 Scores every game for EV on the total.
 """
 
+import json
 import math
+import os
 
 from ev_calculator import calculate_ev, kelly_fraction, suggested_bet_size
 
 
 # League average runs per game (both teams combined), ~2024 baseline
 _BASE_RUNS = 8.8
+
+
+def _load_totals_weights():
+    path = os.path.join(os.path.dirname(__file__), "weights_totals.json")
+    defaults = {
+        "pitcher_fip_weight": 0.5,
+        "wrc_weight": 0.015,
+        "wind_out_bonus": 0.5,
+        "wind_in_penalty": 0.3,
+        "temp_hot_bonus": 0.2,
+        "temp_cold_penalty": 0.4,
+    }
+    if os.path.exists(path):
+        try:
+            with open(path) as f:
+                loaded = json.load(f)
+                defaults.update(loaded)
+        except Exception:
+            pass
+    return defaults
+
+
+TOTALS_WEIGHTS = _load_totals_weights()
 
 # Run factors by stadium (FanGraphs-derived, 1.0 = neutral)
 PARK_RUN_FACTORS = {
@@ -121,27 +146,28 @@ def _find_team_wrc_plus(team_name, batter_df):
     return 100.0
 
 
-def _weather_run_adjustment(weather):
+def _weather_run_adjustment(weather, weights=None):
     """
-    Wind blowing out >10mph: +0.5 runs
-    Wind blowing in: -0.3 runs
-    Temp <45F: -0.4 runs
-    Temp >85F: +0.2 runs
+    Wind blowing out >10mph: +wind_out_bonus runs
+    Wind blowing in: -wind_in_penalty runs
+    Temp <45F: -temp_cold_penalty runs
+    Temp >85F: +temp_hot_bonus runs
     """
+    w = weights or TOTALS_WEIGHTS
     adj = 0.0
     speed = weather.get("wind_speed_mph", 0)
     deg = weather.get("wind_dir_degrees", 0)
 
     if speed >= 10 and 150 <= deg <= 270:
-        adj += 0.5
+        adj += w["wind_out_bonus"]
     elif speed >= 10 and (deg <= 60 or deg >= 330):
-        adj -= 0.3
+        adj -= w["wind_in_penalty"]
 
     temp = weather.get("temp_f", 70)
     if temp < 45:
-        adj -= 0.4
+        adj -= w["temp_cold_penalty"]
     elif temp > 85:
-        adj += 0.2
+        adj += w["temp_hot_bonus"]
 
     return adj
 
@@ -158,7 +184,8 @@ def _over_probability(model_total, book_line):
     return prob
 
 
-def score_game_total(game, batter_df, pitcher_df, weather, odds_lookup):
+def score_game_total(game, batter_df, pitcher_df, weather, odds_lookup,
+                     weights_override=None):
     """
     Score a game for total runs over/under EV.
 
@@ -168,10 +195,12 @@ def score_game_total(game, batter_df, pitcher_df, weather, odds_lookup):
         pitcher_df: pitching stats DataFrame
         weather: dict from get_weather()
         odds_lookup: dict keyed by game matchup string -> odds data
+        weights_override: optional dict to override TOTALS_WEIGHTS
 
     Returns dict with model_total, book_line, best_side, ev_per_dollar, etc.
     Returns None if insufficient data.
     """
+    w = weights_override or TOTALS_WEIGHTS
     stadium = game.get("stadium", "")
     home = game.get("home_team", "")
     away = game.get("away_team", "")
@@ -183,20 +212,19 @@ def score_game_total(game, batter_df, pitcher_df, weather, odds_lookup):
     home_fip = _get_stat(hp_row, ["FIP"], 4.20)
     away_fip = _get_stat(ap_row, ["FIP"], 4.20)
 
-    # Each 1.0 FIP above/below league avg shifts total by ~0.5 runs
-    pitcher_adj = ((home_fip - 4.20) + (away_fip - 4.20)) * 0.5
+    pitcher_adj = ((home_fip - 4.20) + (away_fip - 4.20)) * w["pitcher_fip_weight"]
 
     # Team offense adjustment (wRC+ based: 100 = league avg)
     home_wrc = _find_team_wrc_plus(home, batter_df)
     away_wrc = _find_team_wrc_plus(away, batter_df)
-    offense_adj = ((home_wrc - 100) + (away_wrc - 100)) * 0.015
+    offense_adj = ((home_wrc - 100) + (away_wrc - 100)) * w["wrc_weight"]
 
     # Park adjustment
     park_rf = PARK_RUN_FACTORS.get(stadium, 1.0)
     park_adj = (park_rf - 1.0) * _BASE_RUNS
 
     # Weather adjustment
-    weather_adj = _weather_run_adjustment(weather)
+    weather_adj = _weather_run_adjustment(weather, weights=w)
 
     model_total = _BASE_RUNS + pitcher_adj + offense_adj + park_adj + weather_adj
 
