@@ -197,11 +197,11 @@ def build_features_for_game(game, lineup, batter_df, pitcher_df, weather):
         # Get pitcher stats
         p_row = _get_pitcher_row(opp_pitcher_name, pitcher_df)
         pitcher_hr_fb = _safe_float(
-            _get_stat(p_row, ["HR/FB", "HR_FB", "HR/FB%"]),
+            _get_stat(p_row, ["pitcher_hr_fb", "HR/FB", "HR_FB", "HR/FB%"]),
             _POSITION_AVG["pitcher_hr_fb"]
         )
         pitcher_fb_rate = _safe_float(
-            _get_stat(p_row, ["FB%", "FB_pct", "FBpct"]),
+            _get_stat(p_row, ["fly_ball_rate", "FB%", "FB_pct", "FBpct"]),
             _POSITION_AVG["pitcher_fly_ball_rate"]
         )
         # FB% often comes as percentage (e.g., 35.0 for 35%), normalize to 0-1
@@ -226,14 +226,14 @@ def build_features_for_game(game, lineup, batter_df, pitcher_df, weather):
             b_row = _get_batter_row(batter["name"], batter_df)
 
             barrel_rate = _safe_float(
-                _get_stat(b_row, ["Barrel%", "barrel_rate", "Barrel_pct"]),
+                _get_stat(b_row, ["barrel_rate", "Barrel%", "Barrel_pct"]),
                 _POSITION_AVG["barrel_rate"]
             )
             if barrel_rate > 1:
                 barrel_rate /= 100.0
 
             hr_fb = _safe_float(
-                _get_stat(b_row, ["HR/FB", "HR_FB"]),
+                _get_stat(b_row, ["hr_fb_ratio", "HR/FB", "HR_FB"]),
                 _POSITION_AVG["hr_fb_ratio"]
             )
             if hr_fb > 1:
@@ -245,7 +245,7 @@ def build_features_for_game(game, lineup, batter_df, pitcher_df, weather):
             )
 
             hard_hit = _safe_float(
-                _get_stat(b_row, ["Hard%", "HardHit%", "Hard_pct"]),
+                _get_stat(b_row, ["hard_hit_pct", "Hard%", "HardHit%", "Hard_pct"]),
                 _POSITION_AVG["hard_hit_pct"]
             )
             if hard_hit > 1:

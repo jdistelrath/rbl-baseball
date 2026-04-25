@@ -22,43 +22,30 @@ from scorer import FEATURE_COLS
 # ---------------------------------------------------------------------------
 
 def _load_historical_batting(year):
-    """Load batting stats for a given year via pybaseball."""
-    try:
-        from pybaseball import batting_stats
-        df = batting_stats(year, qual=50)
-        return df
-    except Exception as e:
-        print(f"[backtest] Failed to load batting stats for {year}: {e}")
-        return pd.DataFrame()
+    """Load batting stats for a given year via MLB Stats API."""
+    from data_fetcher import get_batter_statcast
+    return get_batter_statcast(season=year)
 
 
 def _load_historical_pitching(year):
-    """Load pitching stats for a given year via pybaseball."""
-    try:
-        from pybaseball import pitching_stats
-        df = pitching_stats(year, qual=20)
-        return df
-    except Exception as e:
-        print(f"[backtest] Failed to load pitching stats for {year}: {e}")
-        return pd.DataFrame()
+    """Load pitching stats for a given year via MLB Stats API."""
+    from data_fetcher import get_pitcher_statcast
+    return get_pitcher_statcast(season=year)
 
 
 def _load_hr_actuals(year):
     """
-    Load actual HR totals per player for a season using pybaseball.
+    Load actual HR totals per player for a season.
     Returns dict {player_name: total_HR}.
     """
-    try:
-        from pybaseball import batting_stats
-        df = batting_stats(year, qual=1)
-        name_col = "Name" if "Name" in df.columns else df.columns[0]
-        hr_col = "HR" if "HR" in df.columns else None
-        if hr_col is None:
-            return {}
-        return dict(zip(df[name_col], df[hr_col]))
-    except Exception as e:
-        print(f"[backtest] Failed to load HR actuals for {year}: {e}")
+    df = _load_historical_batting(year)
+    if df.empty:
         return {}
+    name_col = "Name" if "Name" in df.columns else df.columns[0]
+    hr_col = "HR" if "HR" in df.columns else None
+    if hr_col is None:
+        return {}
+    return dict(zip(df[name_col], df[hr_col]))
 
 
 # ---------------------------------------------------------------------------
@@ -84,18 +71,21 @@ def _get_stat(row, col_names, default=0.0):
 
 
 def _extract_batter_features(batter_row):
-    """Extract feature vector from a batting_stats row."""
-    barrel = _get_stat(batter_row, ["Barrel%", "barrel_rate"], 6.5)
+    """Extract feature vector from a batting_stats_bref row."""
+    # barrel_rate not in BRef -- use position average
+    barrel = _get_stat(batter_row, ["barrel_rate", "Barrel%"], 0.065)
     if barrel > 1:
         barrel /= 100.0
 
-    hr_fb = _get_stat(batter_row, ["HR/FB", "HR_FB"], 12.0)
+    # hr_fb_ratio: derived column from bref, or FanGraphs column name
+    hr_fb = _get_stat(batter_row, ["hr_fb_ratio", "HR/FB", "HR_FB"], 0.12)
     if hr_fb > 1:
         hr_fb /= 100.0
 
     iso = _get_stat(batter_row, ["ISO"], 0.155)
 
-    hard_hit = _get_stat(batter_row, ["Hard%", "HardHit%"], 35.0)
+    # hard_hit_pct not in BRef -- use position average
+    hard_hit = _get_stat(batter_row, ["hard_hit_pct", "Hard%", "HardHit%"], 0.35)
     if hard_hit > 1:
         hard_hit /= 100.0
 

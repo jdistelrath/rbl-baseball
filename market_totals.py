@@ -110,10 +110,15 @@ def _find_team_wrc_plus(team_name, batter_df):
         if col in team_rows.columns:
             wrc_col = col
             break
-    if wrc_col is None:
-        return 100.0
+    if wrc_col is not None:
+        return _safe_float(team_rows[wrc_col].mean(), 100.0)
 
-    return _safe_float(team_rows[wrc_col].mean(), 100.0)
+    # Fallback: approximate wRC+ from OPS (league avg OPS ~ 0.728 = 100 wRC+)
+    if "OPS" in team_rows.columns:
+        avg_ops = _safe_float(team_rows["OPS"].mean(), 0.728)
+        return (avg_ops / 0.728) * 100.0
+
+    return 100.0
 
 
 def _weather_run_adjustment(weather):

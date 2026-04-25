@@ -1,0 +1,15 @@
+{
+  "barrel_rate": 1.2198078765126699,
+  "hr_fb_ratio": 3.556905234991952,
+  "iso": -1.090765988703925,
+  "hard_hit_pct": 0.9363085529748548,
+  "platoon_factor": 1.2450606589508229,
+  "pitcher_hr_fb": 0.9642212633375113,
+  "pitcher_fly_ball_rate": 0.837105804728998,
+  "pitcher_xfip": 1.8505144313570954,
+  "pitcher_hard_hit_allowed": -0.9172799812988802,
+  "park_hr_factor": 1.6436414161822452,
+  "wind_bonus": 1.3909848534724951,
+  "temp_bonus": 1.2340141649952998,
+  "batting_order_position": 0.500596425426459
+}

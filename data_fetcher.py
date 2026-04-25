@@ -170,50 +170,202 @@ def _get_pitcher_hand(pitcher_id):
 
 
 # ---------------------------------------------------------------------------
-# Statcast / pybaseball
+# Player stats via MLB Stats API (reliable, no scraping)
 # ---------------------------------------------------------------------------
+
+def _fetch_mlb_hitting_stats(season, limit=500):
+    """Fetch hitting stats from MLB Stats API. Returns list of split dicts."""
+    all_splits = []
+    offset = 0
+    while True:
+        url = (
+            f"https://statsapi.mlb.com/api/v1/stats"
+            f"?stats=season&group=hitting&season={season}&sportId=1"
+            f"&limit={limit}&offset={offset}"
+        )
+        try:
+            resp = requests.get(url, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            splits = data.get("stats", [{}])[0].get("splits", [])
+            if not splits:
+                break
+            all_splits.extend(splits)
+            if len(splits) < limit:
+                break
+            offset += limit
+        except Exception as e:
+            print(f"[data_fetcher] MLB hitting stats page failed at offset {offset}: {e}")
+            break
+    return all_splits
+
+
+def _fetch_mlb_pitching_stats(season, limit=500):
+    """Fetch pitching stats from MLB Stats API. Returns list of split dicts."""
+    all_splits = []
+    offset = 0
+    while True:
+        url = (
+            f"https://statsapi.mlb.com/api/v1/stats"
+            f"?stats=season&group=pitching&season={season}&sportId=1"
+            f"&limit={limit}&offset={offset}"
+        )
+        try:
+            resp = requests.get(url, timeout=20)
+            resp.raise_for_status()
+            data = resp.json()
+            splits = data.get("stats", [{}])[0].get("splits", [])
+            if not splits:
+                break
+            all_splits.extend(splits)
+            if len(splits) < limit:
+                break
+            offset += limit
+        except Exception as e:
+            print(f"[data_fetcher] MLB pitching stats page failed at offset {offset}: {e}")
+            break
+    return all_splits
+
+
+def _safe_ip(ip_str):
+    """Convert IP string like '177.2' to float innings (177.667)."""
+    try:
+        v = float(ip_str)
+        whole = int(v)
+        frac = v - whole  # .1 = 1/3, .2 = 2/3
+        return whole + (frac * 10 / 3.0)
+    except (TypeError, ValueError):
+        return 0.0
+
 
 def get_batter_statcast(season=None):
     """
     Returns DataFrame of batter stats for the given season (or current year).
-    Cached once per day.
-    Uses pybaseball.batting_stats() for FanGraphs data.
+    Cached once per day. Uses MLB Stats API.
     """
     season = season or date.today().year
-    cache_key = f"statcast_batters_{season}"
+    cache_key = f"batter_stats_mlb_{season}"
     cached = _load_cache(cache_key)
     if cached is not None:
         return cached
 
-    try:
-        from pybaseball import batting_stats
-        df = batting_stats(season, qual=50)
-        _save_cache(cache_key, df)
-        return df
-    except Exception as e:
-        print(f"[data_fetcher] Batter statcast fetch failed: {e}")
+    splits = _fetch_mlb_hitting_stats(season)
+    if not splits:
+        print(f"[data_fetcher] No batting data returned for {season}")
         return pd.DataFrame()
+
+    rows = []
+    for s in splits:
+        stat = s.get("stat", {})
+        player = s.get("player", {})
+        team = s.get("team", {})
+        ab = int(stat.get("atBats", 0))
+        pa = int(stat.get("plateAppearances", 0))
+        hr = int(stat.get("homeRuns", 0))
+        so = int(stat.get("strikeOuts", 0))
+        avg = float(stat.get("avg", 0))
+        slg = float(stat.get("slg", 0))
+        ops = float(stat.get("ops", 0))
+        obp = float(stat.get("obp", 0))
+
+        iso = slg - avg
+        hr_fb = hr / (ab * 0.35) if ab > 0 else 0.0
+        k_rate = so / pa if pa > 0 else 0.0
+
+        rows.append({
+            "Name": player.get("fullName", ""),
+            "mlbID": player.get("id", 0),
+            "Tm": team.get("abbreviation", ""),
+            "Team": team.get("name", ""),
+            "G": int(stat.get("gamesPlayed", 0)),
+            "PA": pa,
+            "AB": ab,
+            "HR": hr,
+            "SO": so,
+            "BA": avg,
+            "OBP": obp,
+            "SLG": slg,
+            "OPS": ops,
+            "ISO": iso,
+            "hr_fb_ratio": hr_fb,
+            "k_rate": k_rate,
+            "barrel_rate": float("nan"),
+            "hard_hit_pct": float("nan"),
+            "wRC+": (ops / 0.728) * 100 if ops > 0 else 100.0,
+        })
+
+    df = pd.DataFrame(rows)
+    print(f"[data_fetcher] Loaded {len(df)} batters for {season} via MLB Stats API")
+    _save_cache(cache_key, df)
+    return df
 
 
 def get_pitcher_statcast(season=None):
     """
     Returns DataFrame of pitcher stats for the given season.
-    Cached once per day.
+    Cached once per day. Uses MLB Stats API.
     """
     season = season or date.today().year
-    cache_key = f"statcast_pitchers_{season}"
+    cache_key = f"pitcher_stats_mlb_{season}"
     cached = _load_cache(cache_key)
     if cached is not None:
         return cached
 
-    try:
-        from pybaseball import pitching_stats
-        df = pitching_stats(season, qual=20)
-        _save_cache(cache_key, df)
-        return df
-    except Exception as e:
-        print(f"[data_fetcher] Pitcher statcast fetch failed: {e}")
+    splits = _fetch_mlb_pitching_stats(season)
+    if not splits:
+        print(f"[data_fetcher] No pitching data returned for {season}")
         return pd.DataFrame()
+
+    rows = []
+    for s in splits:
+        stat = s.get("stat", {})
+        player = s.get("player", {})
+        team = s.get("team", {})
+        ip = _safe_ip(stat.get("inningsPitched", "0"))
+        hr = int(stat.get("homeRuns", 0))
+        so = int(stat.get("strikeOuts", 0))
+        bb = int(stat.get("baseOnBalls", 0))
+        era = float(stat.get("era", 0))
+        gs = int(stat.get("gamesStarted", 0))
+        k9 = float(stat.get("strikeoutsPer9Inn", 0))
+        kbb = float(stat.get("strikeoutWalkRatio", 0))
+        go_ao = float(stat.get("groundOutsToAirouts", 0))
+        whip = float(stat.get("whip", 0))
+
+        # Derived fields
+        pitcher_hr_fb = hr / (ip * 1.2) if ip > 0 else 0.0
+        fb_rate = 1.0 / (1.0 + go_ao) if go_ao > 0 else 0.45
+
+        rows.append({
+            "Name": player.get("fullName", ""),
+            "mlbID": player.get("id", 0),
+            "Tm": team.get("abbreviation", ""),
+            "Team": team.get("name", ""),
+            "G": int(stat.get("gamesPitched", 0)),
+            "GS": gs,
+            "IP": ip,
+            "ERA": era,
+            "FIP": era,  # ERA as FIP proxy
+            "xFIP": era,
+            "HR": hr,
+            "SO": so,
+            "BB": bb,
+            "WHIP": whip,
+            "K/9": k9,
+            "K9": k9,
+            "SO9": k9,
+            "K/BB": kbb,
+            "SO/W": kbb,
+            "pitcher_hr_fb": pitcher_hr_fb,
+            "fly_ball_rate": fb_rate,
+            "FB%": fb_rate,
+            "pitcher_hard_hit_allowed": float("nan"),
+        })
+
+    df = pd.DataFrame(rows)
+    print(f"[data_fetcher] Loaded {len(df)} pitchers for {season} via MLB Stats API")
+    _save_cache(cache_key, df)
+    return df
 
 
 # ---------------------------------------------------------------------------
