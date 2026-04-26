@@ -20,7 +20,7 @@ def _validate_american_odds(american_odds):
             f"Odds value {odds} looks like decimal odds, not American. "
             "American odds are integers like -150 or +130."
         )
-    if odds > 5000 or odds < -5000:
+    if odds > 50000 or odds < -50000:
         print(f"[ev_calculator] WARNING: extreme odds value {odds}", file=sys.stderr)
     return odds
 

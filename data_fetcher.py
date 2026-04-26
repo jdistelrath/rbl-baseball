@@ -521,9 +521,31 @@ def get_odds(sport="baseball_mlb", markets="h2h,totals"):
         return {}
 
 
+def _get_mlb_event_ids():
+    """Fetch current MLB event IDs from The Odds API."""
+    if not CFG.odds_api_key or CFG.odds_api_key == "your_odds_api_key_here":
+        return []
+
+    url = (
+        f"https://api.the-odds-api.com/v4/sports/baseball_mlb/events"
+        f"?apiKey={CFG.odds_api_key}"
+    )
+    try:
+        resp = requests.get(url, timeout=15)
+        resp.raise_for_status()
+        events = resp.json()
+        if not isinstance(events, list):
+            return []
+        return events
+    except Exception as e:
+        print(f"[data_fetcher] Event IDs fetch failed: {e}")
+        return []
+
+
 def get_player_props(market="batter_home_runs"):
     """
     Pull player prop lines from The Odds API.
+    Player props require event-level endpoints (not sport-level).
     market: "batter_home_runs" or "pitcher_strikeouts"
     Returns list of dicts with player_name, over_line, over_odds, under_odds, etc.
     Prefers DraftKings, falls back to FanDuel, then others.
@@ -531,29 +553,42 @@ def get_player_props(market="batter_home_runs"):
     if not CFG.odds_api_key or CFG.odds_api_key == "your_odds_api_key_here":
         return []
 
-    url = (
-        f"https://api.the-odds-api.com/v4/sports/baseball_mlb/odds/"
-        f"?apiKey={CFG.odds_api_key}&regions=us&markets={market}&oddsFormat=american"
-    )
-    try:
-        resp = requests.get(url, timeout=20)
-        resp.raise_for_status()
-        events = resp.json()
-    except Exception as e:
-        print(f"[data_fetcher] Player props fetch failed ({market}): {e}")
+    # Step 1: get event IDs
+    events = _get_mlb_event_ids()
+    if not events:
+        print(f"[data_fetcher] No MLB events found for player props.")
         return []
+
+    print(f"[data_fetcher] Found {len(events)} MLB events, fetching {market} props...")
 
     from ev_calculator import american_to_implied_prob
 
     PREFERRED_BOOKS = ["draftkings", "fanduel", "betmgm"]
     results = []
 
-    for event in events if isinstance(events, list) else []:
-        home_team = event.get("home_team", "")
-        away_team = event.get("away_team", "")
+    # Step 2: for each event, fetch player prop odds
+    for event_info in events:
+        event_id = event_info.get("id", "")
+        home_team = event_info.get("home_team", "")
+        away_team = event_info.get("away_team", "")
+
+        if not event_id:
+            continue
+
+        url = (
+            f"https://api.the-odds-api.com/v4/sports/baseball_mlb/events/{event_id}/odds"
+            f"?apiKey={CFG.odds_api_key}&regions=us&markets={market}&oddsFormat=american"
+        )
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            event_data = resp.json()
+        except Exception as e:
+            # Skip this event silently (may not have props yet)
+            continue
 
         bookmakers = sorted(
-            event.get("bookmakers", []),
+            event_data.get("bookmakers", []),
             key=lambda b: (0 if b.get("key", "") in PREFERRED_BOOKS else 1)
         )
 
