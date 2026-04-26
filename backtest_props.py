@@ -108,6 +108,9 @@ def _fetch_batter_game_logs(player_id, season):
 # Build projection models (same logic as market_sweep.py)
 # ---------------------------------------------------------------------------
 
+K_BIAS_CORRECTION = -0.37  # corrects consistent over-projection of ~+0.37 Ks
+
+
 def _project_pitcher_ks(pitcher_row, opp_k_rate=0.225):
     """Project Ks for a start using K/9 * IP/start * opp K-rate adjustment."""
     try:
@@ -120,7 +123,7 @@ def _project_pitcher_ks(pitcher_row, opp_k_rate=0.225):
         return None
     ip_per_start = min(ip / max(gs, 1), 6.5)
     k_rate_adj = 1.0 + (opp_k_rate - 0.225) * 0.5
-    return (k9 / 9.0) * ip_per_start * k_rate_adj
+    return (k9 / 9.0) * ip_per_start * k_rate_adj + K_BIAS_CORRECTION
 
 
 def _project_batter_rates(batter_row):
