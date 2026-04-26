@@ -1,7 +1,7 @@
 """
 Daily Picks Pipeline.
 Pulls today's confirmed lineups and starting pitchers, runs K/Hits/TB/HR
-models, outputs sharp_brief.txt and floor_list.txt.
+models, outputs sharp_brief.txt and hr_list.txt.
 
 Usage: python main.py daily_picks
 """
@@ -427,10 +427,10 @@ def run_daily_picks():
     # --- Generate sharp brief ---
     _write_sharp_brief(k_picks, batter_picks, today)
 
-    # --- Generate floor list (only players with lines) ---
-    _write_floor_list(k_picks, batter_picks, today)
+    # --- Generate HR list ---
+    _write_hr_list(batter_picks, today)
 
-    print(f"[daily_picks] Output written to outputs/sharp_brief.txt and outputs/floor_list.txt")
+    print(f"[daily_picks] Output written to outputs/sharp_brief.txt and outputs/hr_list.txt")
 
 
 def _attach_k_lines(k_picks, odds_lines):
@@ -624,51 +624,22 @@ def _write_sharp_brief(k_picks, batter_picks, today):
     print(f"[daily_picks] sharp_brief.txt written ({len(lines)} lines)")
 
 
-def _write_floor_list(k_picks, batter_picks, today):
-    """Write the floor list: top 10 names ranked by composite score.
-
-    Only includes players where at least one book line was found.
-    """
+def _write_hr_list(batter_picks, today):
+    """Write the HR list: top 10 batters most likely to homer, by calibrated HR probability."""
     out_dir = CFG.outputs_dir
     out_dir.mkdir(exist_ok=True)
 
-    # Filter to players with at least one book line
-    batters_with_lines = [b for b in batter_picks if b.get("has_any_line")]
-    ks_with_lines = [p for p in k_picks if p.get("has_line")]
-
-    # Composite score for batters: normalize each metric to 0-1 and average
-    scored = []
-    if batters_with_lines:
-        max_h = max(b["h_proj"] for b in batters_with_lines) or 1
-        max_tb = max(b["tb_proj"] for b in batters_with_lines) or 1
-        max_hr = max(b["hr_prob"] for b in batters_with_lines) or 1
-
-        for b in batters_with_lines:
-            composite = (
-                (b["h_proj"] / max_h) * 0.30 +
-                (b["tb_proj"] / max_tb) * 0.35 +
-                (b["hr_prob"] / max_hr) * 0.35
-            )
-            scored.append((b["name"], b["team"], "B", composite))
-
-    # Add K pitchers with a normalized score
-    if ks_with_lines:
-        max_k = max(p["proj_k"] for p in ks_with_lines) or 1
-        for p in ks_with_lines:
-            composite = (p["proj_k"] / max_k) * 0.80
-            scored.append((p["name"], p["team"], "P", composite))
-
-    scored.sort(key=lambda x: x[3], reverse=True)
+    ranked = sorted(batter_picks, key=lambda b: b.get("hr_prob", 0), reverse=True)
 
     lines = []
-    for i, (name, team, ptype, _) in enumerate(scored[:10], 1):
-        tag = "[P]" if ptype == "P" else "[B]"
-        lines.append(f"{i}. {tag} {name}")
+    for i, b in enumerate(ranked[:10], 1):
+        prob_pct = f"{b['hr_prob']*100:.1f}%" if b.get("hr_prob") else "—"
+        lines.append(f"{i}. {b['name']} ({b['team']}) — {prob_pct}")
 
     if not lines:
-        lines.append("No players with available book lines today.")
+        lines.append("No batter projections available today.")
 
     text = "\n".join(lines)
-    with open(out_dir / "floor_list.txt", "w") as f:
+    with open(out_dir / "hr_list.txt", "w") as f:
         f.write(text)
-    print(f"[daily_picks] floor_list.txt written ({len(lines)} names, lines-only filter)")
+    print(f"[daily_picks] hr_list.txt written ({len(lines)} names)")

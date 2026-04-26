@@ -78,7 +78,7 @@ def api_backtest():
 def _run_picks_pipeline():
     games = get_today_schedule()
     if not games:
-        return {"k_picks": [], "batter_picks": [], "floor_list": [], "meta": {"games": 0}}
+        return {"k_picks": [], "batter_picks": [], "hr_list": [], "meta": {"games": 0}}
 
     batter_df = get_batter_statcast()
     pitcher_df = get_pitcher_statcast()
@@ -196,20 +196,9 @@ def _run_picks_pipeline():
                 b[f"{short}_book"] = None
                 b[f"{short}_edge"] = 0
 
-    # Build floor list (composite score)
-    floor = []
-    if batter_picks:
-        max_h = max((b["h_proj"] for b in batter_picks), default=1) or 1
-        max_tb = max((b["tb_proj"] for b in batter_picks), default=1) or 1
-        max_hr = max((b["hr_prob"] for b in batter_picks), default=1) or 0.01
-        for b in batter_picks:
-            score = (b["h_proj"]/max_h)*0.30 + (b["tb_proj"]/max_tb)*0.35 + (b["hr_prob"]/max_hr)*0.35
-            floor.append({"name": b["name"], "team": b["team"], "type": "B", "score": round(score, 3)})
-    if k_picks:
-        max_k = max((p["proj_k"] for p in k_picks), default=1) or 1
-        for p in k_picks:
-            floor.append({"name": p["name"], "team": p["team"], "type": "P", "score": round((p["proj_k"]/max_k)*0.8, 3)})
-    floor.sort(key=lambda x: x["score"], reverse=True)
+    # Build HR list: top 10 batters by calibrated HR probability
+    hr_list = sorted(batter_picks, key=lambda x: x.get("hr_prob", 0), reverse=True)[:10]
+    hr_list = [{"name": b["name"], "team": b["team"], "hr_prob": b["hr_prob"]} for b in hr_list]
 
     lines_note = ""
     if not odds_lines:
@@ -218,7 +207,7 @@ def _run_picks_pipeline():
     return {
         "k_picks": sorted(k_picks, key=lambda x: x["proj_k"], reverse=True),
         "batter_picks": sorted(batter_picks, key=lambda x: x["hr_prob"], reverse=True),
-        "floor_list": floor[:10],
+        "hr_list": hr_list,
         "meta": {
             "date": date.today().isoformat(),
             "games": len(games),
@@ -236,16 +225,16 @@ def _run_picks_pipeline():
 def _run_backtest(params):
     prop_type = params.get("prop_type", "pitcher_strikeouts")
     min_edge = float(params.get("min_edge", 0.03))
-    year = int(params.get("year", 2024))
+    start_year = int(params.get("start_year", params.get("year", 2024)))
+    end_year = int(params.get("end_year", start_year))
+    team_filter = params.get("team", "all")
+    line = float(params.get("line", 5.5))
 
     from backtest_props import (
         _fetch_pitcher_game_logs, _fetch_batter_game_logs,
         _load_cache, _save_cache, _project_pitcher_ks, _project_batter_rates,
         K_BIAS_CORRECTION,
     )
-
-    batter_df = get_batter_statcast(season=year - 1)
-    pitcher_df = get_pitcher_statcast(season=year - 1)
 
     STAKE = 1.0
     JUICE_BRK = 0.5238  # breakeven at -110
@@ -255,70 +244,93 @@ def _run_backtest(params):
     total_wins = 0
     total_pnl = 0.0
 
-    if prop_type == "pitcher_strikeouts":
-        starters = pitcher_df[(pitcher_df["GS"] >= 10) & (pitcher_df["K9"] > 0)]
-        line = float(params.get("line", 5.5))
+    # Map abbreviations to full team names for filtering
+    ABBR_TO_TEAM = {
+        "AZ": "Arizona Diamondbacks", "ATL": "Atlanta Braves", "BAL": "Baltimore Orioles",
+        "BOS": "Boston Red Sox", "CHC": "Chicago Cubs", "CWS": "Chicago White Sox",
+        "CIN": "Cincinnati Reds", "CLE": "Cleveland Guardians", "COL": "Colorado Rockies",
+        "DET": "Detroit Tigers", "HOU": "Houston Astros", "KC": "Kansas City Royals",
+        "LAA": "Los Angeles Angels", "LAD": "Los Angeles Dodgers", "MIA": "Miami Marlins",
+        "MIL": "Milwaukee Brewers", "MIN": "Minnesota Twins", "NYM": "New York Mets",
+        "NYY": "New York Yankees", "OAK": "Athletics", "PHI": "Philadelphia Phillies",
+        "PIT": "Pittsburgh Pirates", "SD": "San Diego Padres", "SF": "San Francisco Giants",
+        "SEA": "Seattle Mariners", "STL": "St. Louis Cardinals", "TB": "Tampa Bay Rays",
+        "TEX": "Texas Rangers", "TOR": "Toronto Blue Jays", "WSH": "Washington Nationals",
+    }
+    team_full = ABBR_TO_TEAM.get(team_filter, "") if team_filter != "all" else ""
 
-        for _, row in starters.iterrows():
-            pid = int(row["mlbID"])
-            proj = _project_pitcher_ks(row)
-            if proj is None:
+    years = list(range(start_year, end_year + 1))
+
+    for year in years:
+        print(f"[api/backtest] Processing {year}...")
+        batter_df = get_batter_statcast(season=year - 1)
+        pitcher_df = get_pitcher_statcast(season=year - 1)
+
+        if prop_type == "pitcher_strikeouts":
+            starters = pitcher_df[(pitcher_df["GS"] >= 10) & (pitcher_df["K9"] > 0)]
+            if team_full:
+                starters = starters[starters["Team"] == team_full]
+
+            for _, row in starters.iterrows():
+                pid = int(row["mlbID"])
+                proj = _project_pitcher_ks(row)
+                if proj is None:
+                    continue
+                model_prob = _poisson_over_prob(proj, line)
+                if model_prob - JUICE_BRK < min_edge:
+                    continue
+
+                logs = _fetch_pitcher_game_logs(pid, year)
+                for g in logs:
+                    actual = g["actual_k"]
+                    won = actual > line
+                    pnl = (STAKE * 0.909) if won else -STAKE
+                    total_bets += 1
+                    total_wins += int(won)
+                    total_pnl += pnl
+                    try:
+                        dt = datetime.strptime(g["date"], "%Y-%m-%d")
+                        week_key = dt.strftime("%Y-W%W")
+                        results_by_week.setdefault(week_key, 0.0)
+                        results_by_week[week_key] += pnl
+                    except (ValueError, TypeError):
+                        pass
+
+        elif prop_type in ("batter_hits", "batter_total_bases"):
+            proj_key = "h" if prop_type == "batter_hits" else "tb"
+
+            if "H" not in batter_df.columns:
                 continue
-            model_prob = _poisson_over_prob(proj, line)
-            if model_prob - JUICE_BRK < min_edge:
-                continue
 
-            logs = _fetch_pitcher_game_logs(pid, year)
-            for g in logs:
-                actual = g["actual_k"]
-                won = actual > line
-                pnl = (STAKE * 0.909) if won else -STAKE
-                total_bets += 1
-                total_wins += int(won)
-                total_pnl += pnl
+            qualified = batter_df[batter_df["G"] >= 50]
+            if team_full:
+                qualified = qualified[qualified["Team"] == team_full]
 
-                # Weekly bucketing
-                try:
-                    dt = datetime.strptime(g["date"], "%Y-%m-%d")
-                    week_key = dt.strftime("%Y-W%W")
-                    results_by_week.setdefault(week_key, 0.0)
-                    results_by_week[week_key] += pnl
-                except (ValueError, TypeError):
-                    pass
+            for _, row in qualified.iterrows():
+                pid = int(row["mlbID"])
+                rates = _project_batter_rates(row)
+                if rates[0] is None:
+                    continue
+                proj_val = rates[0] if proj_key == "h" else rates[1]
+                model_prob = _poisson_over_prob(proj_val, line)
+                if model_prob - JUICE_BRK < min_edge:
+                    continue
 
-    elif prop_type in ("batter_hits", "batter_total_bases"):
-        line = float(params.get("line", 1.5 if prop_type == "batter_hits" else 2.5))
-        proj_key = "h" if prop_type == "batter_hits" else "tb"
-
-        if "H" not in batter_df.columns:
-            return {"error": "Batter stats missing H/TB columns. Clear cache and re-run."}
-
-        qualified = batter_df[batter_df["G"] >= 50]
-        for _, row in qualified.iterrows():
-            pid = int(row["mlbID"])
-            rates = _project_batter_rates(row)
-            if rates[0] is None:
-                continue
-            proj_val = rates[0] if proj_key == "h" else rates[1]
-            model_prob = _poisson_over_prob(proj_val, line)
-            if model_prob - JUICE_BRK < min_edge:
-                continue
-
-            logs = _fetch_batter_game_logs(pid, year)
-            for g in logs:
-                actual = g[f"actual_{proj_key}"]
-                won = actual > line
-                pnl = (STAKE * 0.909) if won else -STAKE
-                total_bets += 1
-                total_wins += int(won)
-                total_pnl += pnl
-                try:
-                    dt = datetime.strptime(g["date"], "%Y-%m-%d")
-                    week_key = dt.strftime("%Y-W%W")
-                    results_by_week.setdefault(week_key, 0.0)
-                    results_by_week[week_key] += pnl
-                except (ValueError, TypeError):
-                    pass
+                logs = _fetch_batter_game_logs(pid, year)
+                for g in logs:
+                    actual = g[f"actual_{proj_key}"]
+                    won = actual > line
+                    pnl = (STAKE * 0.909) if won else -STAKE
+                    total_bets += 1
+                    total_wins += int(won)
+                    total_pnl += pnl
+                    try:
+                        dt = datetime.strptime(g["date"], "%Y-%m-%d")
+                        week_key = dt.strftime("%Y-W%W")
+                        results_by_week.setdefault(week_key, 0.0)
+                        results_by_week[week_key] += pnl
+                    except (ValueError, TypeError):
+                        pass
 
     win_rate = total_wins / total_bets if total_bets > 0 else 0
     roi = total_pnl / (total_bets * STAKE) * 100 if total_bets > 0 else 0

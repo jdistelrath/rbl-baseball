@@ -90,7 +90,7 @@
   </div>
 
   <div class="card">
-    <h2>Floor List (Top 10)</h2>
+    <h2>HR List (Top 10 Most Likely to Homer)</h2>
     <div class="floor-grid" id="floorGrid"></div>
   </div>
 </div>
@@ -101,12 +101,57 @@
     <h2>Strategy Backtester</h2>
     <div class="bt-row">
       <div class="bt-field">
-        <label>Year</label>
-        <select id="btYear">
+        <label>Start Year</label>
+        <select id="btStartYear">
           <option value="2022">2022</option>
           <option value="2023">2023</option>
           <option value="2024" selected>2024</option>
           <option value="2025">2025</option>
+        </select>
+      </div>
+      <div class="bt-field">
+        <label>End Year</label>
+        <select id="btEndYear">
+          <option value="2022">2022</option>
+          <option value="2023">2023</option>
+          <option value="2024">2024</option>
+          <option value="2025" selected>2025</option>
+        </select>
+      </div>
+      <div class="bt-field">
+        <label>Team</label>
+        <select id="btTeam">
+          <option value="all">All Teams</option>
+          <option value="AZ">Arizona Diamondbacks</option>
+          <option value="ATL">Atlanta Braves</option>
+          <option value="BAL">Baltimore Orioles</option>
+          <option value="BOS">Boston Red Sox</option>
+          <option value="CHC">Chicago Cubs</option>
+          <option value="CWS">Chicago White Sox</option>
+          <option value="CIN">Cincinnati Reds</option>
+          <option value="CLE">Cleveland Guardians</option>
+          <option value="COL">Colorado Rockies</option>
+          <option value="DET">Detroit Tigers</option>
+          <option value="HOU">Houston Astros</option>
+          <option value="KC">Kansas City Royals</option>
+          <option value="LAA">Los Angeles Angels</option>
+          <option value="LAD">Los Angeles Dodgers</option>
+          <option value="MIA">Miami Marlins</option>
+          <option value="MIL">Milwaukee Brewers</option>
+          <option value="MIN">Minnesota Twins</option>
+          <option value="NYM">New York Mets</option>
+          <option value="NYY">New York Yankees</option>
+          <option value="OAK">Athletics</option>
+          <option value="PHI">Philadelphia Phillies</option>
+          <option value="PIT">Pittsburgh Pirates</option>
+          <option value="SD">San Diego Padres</option>
+          <option value="SF">San Francisco Giants</option>
+          <option value="SEA">Seattle Mariners</option>
+          <option value="STL">St. Louis Cardinals</option>
+          <option value="TB">Tampa Bay Rays</option>
+          <option value="TEX">Texas Rangers</option>
+          <option value="TOR">Toronto Blue Jays</option>
+          <option value="WSH">Washington Nationals</option>
         </select>
       </div>
       <div class="bt-field">
@@ -119,7 +164,11 @@
       </div>
       <div class="bt-field">
         <label>Line</label>
-        <input type="number" id="btLine" value="5.5" step="0.5" style="width:70px">
+        <select id="btLine">
+          <option value="4.5">4.5</option>
+          <option value="5.5" selected>5.5</option>
+          <option value="6.5">6.5</option>
+        </select>
       </div>
       <div class="bt-field">
         <label>Min Edge %</label>
@@ -226,18 +275,17 @@ async function loadPicks() {
       bb.appendChild(tr);
     });
 
-    // Floor list
+    // HR list
     const fg = document.getElementById('floorGrid');
     fg.innerHTML = '';
-    d.floor_list.forEach((f, i) => {
+    (d.hr_list || []).forEach((f, i) => {
       const div = document.createElement('div');
       div.className = 'floor-card';
-      const tag = f.type === 'P'
-        ? '<span style="color:var(--yellow);font-size:0.7rem">[P]</span> '
-        : '<span style="color:var(--blue);font-size:0.7rem">[B]</span> ';
+      const prob = f.hr_prob ? (f.hr_prob * 100).toFixed(1) + '% HR' : '';
       div.innerHTML = '<div class="floor-rank">#' + (i + 1) + '</div>' +
-        '<div class="floor-name">' + tag + f.name + '</div>' +
-        '<div class="floor-team">' + f.team + '</div>';
+        '<div class="floor-name">' + f.name + '</div>' +
+        '<div class="floor-team">' + f.team + '</div>' +
+        '<div style="color:var(--green);font-size:0.8rem;margin-top:2px">' + prob + '</div>';
       fg.appendChild(div);
     });
 
@@ -261,7 +309,9 @@ async function runBacktest() {
   document.getElementById('chartWrap').style.display = 'none';
 
   const params = {
-    year: document.getElementById('btYear').value,
+    start_year: document.getElementById('btStartYear').value,
+    end_year: document.getElementById('btEndYear').value,
+    team: document.getElementById('btTeam').value,
     prop_type: document.getElementById('btProp').value,
     line: document.getElementById('btLine').value,
     min_edge: document.getElementById('btEdge').value / 100,
@@ -334,10 +384,21 @@ async function runBacktest() {
 /* ---- Auto-load on page load ---- */
 window.addEventListener('DOMContentLoaded', loadPicks);
 
-/* ---- Update line defaults when prop type changes ---- */
+/* ---- Update line options when prop type changes ---- */
+const lineOptions = {
+  pitcher_strikeouts: [{v:'4.5',t:'4.5'},{v:'5.5',t:'5.5',sel:true},{v:'6.5',t:'6.5'}],
+  batter_hits:        [{v:'0.5',t:'0.5'},{v:'1.5',t:'1.5',sel:true}],
+  batter_total_bases: [{v:'0.5',t:'0.5'},{v:'1.5',t:'1.5'},{v:'2.5',t:'2.5',sel:true}],
+};
 document.getElementById('btProp').addEventListener('change', function() {
-  const defaults = { pitcher_strikeouts: 5.5, batter_hits: 1.5, batter_total_bases: 2.5 };
-  document.getElementById('btLine').value = defaults[this.value] || 5.5;
+  const sel = document.getElementById('btLine');
+  sel.innerHTML = '';
+  (lineOptions[this.value] || []).forEach(o => {
+    const opt = document.createElement('option');
+    opt.value = o.v; opt.textContent = o.t;
+    if (o.sel) opt.selected = true;
+    sel.appendChild(opt);
+  });
 });
 </script>
 </body>
