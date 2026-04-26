@@ -108,7 +108,7 @@
     <h2>Batter Props (Hits / TB / HR)</h2>
     <table><thead><tr>
       <th>Batter</th><th>Team</th><th>Prop</th>
-      <th>Book</th><th>Model</th><th>Impl</th><th>Edge</th><th>vs</th>
+      <th>Best Book</th><th>Model</th><th>Impl</th><th>Edge</th><th>Also On</th><th>vs</th>
     </tr></thead><tbody id="batBody"></tbody></table>
   </div>
 
@@ -446,7 +446,8 @@ async function loadPicks() {
           name: b.name, team: b.team, opp: b.opp_pitcher,
           label: label, line: b[mkt+'_line'], price: b[mkt+'_price'],
           book: b[mkt+'_book'], model: b[mkt+'_model'], impl: b[mkt+'_impl'], edge: edge,
-          kelly_frac: b[mkt+'_kelly_frac'] || 0, kelly_bet: b[mkt+'_kelly_bet'] || 0
+          kelly_frac: b[mkt+'_kelly_frac'] || 0,
+          all_books: b[mkt+'_all_books'] || [],
         });
       }
     });
@@ -457,11 +458,13 @@ async function loadPicks() {
       const bookStr = r.book + ' O' + r.line + ' (' + oddsFmt(r.price) + ')';
       const tr = document.createElement('tr');
       if (r.edge < 0.02) tr.style.opacity = '0.4';
+      const otherBooks = (r.all_books || []).filter(bk => bk !== r.book).join(', ') || '—';
       tr.innerHTML = '<td><b>' + r.name + '</b></td><td>' + r.team + '</td>' +
         '<td>' + r.label + '</td>' +
         '<td>' + bookStr + '</td>' +
         '<td>' + pctFmt(r.model) + '</td><td>' + pctFmt(r.impl) + '</td>' +
         '<td class="' + edgeCls(r.edge) + '">' + edgeFmt(r.edge) + '</td>' +
+        '<td style="color:var(--muted);font-size:0.75rem">' + otherBooks + '</td>' +
         '<td style="color:var(--muted);font-size:0.8rem">vs ' + r.opp + '</td>';
       bb.appendChild(tr);
       if (r.edge > 0.10) allPlays.push({
@@ -470,7 +473,7 @@ async function loadPicks() {
         kelly_frac: r.kelly_frac, kelly_bet: r.kelly_bet
       });
     });
-    if (!batRows.length) bb.innerHTML = '<tr><td colspan="8" style="color:var(--muted)">No batter prop lines available</td></tr>';
+    if (!batRows.length) bb.innerHTML = '<tr><td colspan="9" style="color:var(--muted)">No batter prop lines available</td></tr>';
 
     // Top Plays card (green picks only)
     const topCard = document.getElementById('topCard');

@@ -25,7 +25,8 @@ from data_fetcher import (
 )
 from daily_picks import (
     _project_ks, _project_batter, _find_pitcher_row, _find_batter_row,
-    _get_team_k_rate, fetch_odds_lines, _lookup_line, _normalize_name,
+    _get_team_k_rate, fetch_odds_lines, fetch_underdog_lines,
+    _lookup_line, _lookup_all_books, _normalize_name,
     _poisson_over_prob, _american_to_implied, BOOK_DISPLAY, ODDS_BOOKS,
 )
 from backtest_props import (
@@ -269,15 +270,22 @@ def _run_picks_pipeline():
                     "park_factor": pf, "bat_side": bat_side,
                 })
 
-    # Attach odds lines
+    # Attach odds lines (DK/FD + Underdog)
     odds_lines = {}
     try:
         odds_lines = fetch_odds_lines()
     except Exception as e:
         print(f"[app] Odds fetch failed: {e}")
+    try:
+        ud = fetch_underdog_lines()
+        for key, entries in ud.items():
+            odds_lines.setdefault(key, []).extend(entries)
+    except Exception as e:
+        print(f"[app] Underdog fetch failed: {e}")
 
     for p in k_picks:
         entry = _lookup_line(odds_lines, p["name"], "pitcher_strikeouts")
+        all_bks = _lookup_all_books(odds_lines, p["name"], "pitcher_strikeouts")
         if entry:
             p["book"] = BOOK_DISPLAY.get(entry["book"], entry["book"])
             p["book_line"] = entry["line"]
@@ -285,15 +293,18 @@ def _run_picks_pipeline():
             p["book_impl"] = round(entry["implied_prob"], 3)
             p["model_prob"] = round(_poisson_over_prob(p["proj_k"], entry["line"]), 3)
             p["edge"] = round(p["model_prob"] - p["book_impl"], 3)
+            p["all_books"] = list(all_bks.keys())
         else:
             p["book"] = None
             p["edge"] = 0
+            p["all_books"] = []
 
     for b in batter_picks:
         for mkt, proj_key in [("batter_hits", "h_proj"), ("batter_total_bases", "tb_proj"),
                                ("batter_home_runs", None)]:
             short = mkt.replace("batter_", "")
             entry = _lookup_line(odds_lines, b["name"], mkt)
+            all_bks = _lookup_all_books(odds_lines, b["name"], mkt)
             if entry:
                 b[f"{short}_book"] = BOOK_DISPLAY.get(entry["book"], entry["book"])
                 b[f"{short}_line"] = entry["line"]
@@ -304,9 +315,11 @@ def _run_picks_pipeline():
                 else:
                     b[f"{short}_model"] = round(_poisson_over_prob(b[proj_key], entry["line"]), 3)
                 b[f"{short}_edge"] = round(b[f"{short}_model"] - b[f"{short}_impl"], 3)
+                b[f"{short}_all_books"] = list(all_bks.keys())
             else:
                 b[f"{short}_book"] = None
                 b[f"{short}_edge"] = 0
+                b[f"{short}_all_books"] = []
 
     # Kelly sizing — return raw fraction, client applies mode/cap
     def _kelly_raw(model_prob, american_odds):

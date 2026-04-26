@@ -30,7 +30,7 @@ ODDS_MARKETS = [
     "batter_home_runs",
 ]
 ODDS_BOOKS = ["draftkings", "fanduel"]
-BOOK_DISPLAY = {"draftkings": "DK", "fanduel": "FD"}
+BOOK_DISPLAY = {"draftkings": "DK", "fanduel": "FD", "underdog": "UD"}
 
 
 def _american_to_implied(price):
@@ -127,6 +127,80 @@ def fetch_odds_lines():
     return lines
 
 
+def fetch_underdog_lines():
+    """Fetch MLB player prop lines from Underdog Fantasy public API.
+
+    Returns dict keyed by (normalized_name, market) -> list of
+    {book, line, price, implied_prob, name_raw} — same format as fetch_odds_lines.
+    Underdog uses pick'em (no American odds), so we use -110 as a proxy price.
+    """
+    STAT_TO_MARKET = {
+        "Strikeouts": "pitcher_strikeouts",
+        "Hits": "batter_hits",
+        "Total Bases": "batter_total_bases",
+        "Home Runs": "batter_home_runs",
+    }
+
+    try:
+        resp = requests.get(
+            "https://api.underdogfantasy.com/beta/v5/over_under_lines",
+            timeout=10, headers={"Accept": "application/json"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"[underdog] Fetch failed: {e}")
+        return {}
+
+    players = {p["id"]: p for p in data.get("players", [])}
+    appearances = {a["id"]: a for a in data.get("appearances", [])}
+    games = {g["id"]: g for g in data.get("games", [])}
+
+    lines = {}
+    count = 0
+
+    for l in data.get("over_under_lines", []):
+        ou = l.get("over_under", {})
+        app_stat = ou.get("appearance_stat", {})
+        app_id = app_stat.get("appearance_id", "")
+        app = appearances.get(app_id, {})
+        game = games.get(app.get("match_id", ""), {})
+
+        if game.get("sport_id") != "MLB":
+            continue
+
+        stat_name = app_stat.get("display_stat", "")
+        market = STAT_TO_MARKET.get(stat_name)
+        if not market:
+            continue
+
+        player_id = app.get("player_id", "")
+        player = players.get(player_id, {})
+        name_raw = f"{player.get('first_name', '')} {player.get('last_name', '')}".strip()
+        if not name_raw:
+            continue
+
+        line_val = l.get("stat_value")
+        if line_val is None:
+            continue
+
+        norm = _normalize_name(name_raw)
+        # Underdog is pick'em (no odds), treat as -110 proxy
+        entry = {
+            "book": "underdog",
+            "line": float(line_val),
+            "price": -110,
+            "implied_prob": 0.524,
+            "name_raw": name_raw,
+        }
+        key = (norm, market)
+        lines.setdefault(key, []).append(entry)
+        count += 1
+
+    print(f"[underdog] Loaded {count} MLB prop lines")
+    return lines
+
+
 def _normalize_name(name):
     """Lowercase, strip suffixes like Jr./III, collapse whitespace."""
     n = name.lower().strip()
@@ -137,16 +211,28 @@ def _normalize_name(name):
 
 
 def _lookup_line(lines, player_name, market):
-    """Find best book line for a player+market.  Prefer DK, then FD."""
+    """Find best book line for a player+market.  Prefer DK, then FD, then UD."""
     norm = _normalize_name(player_name)
     entries = lines.get((norm, market), [])
     if not entries:
         return None
-    for pref in ODDS_BOOKS:
+    for pref in ["draftkings", "fanduel", "underdog"]:
         for e in entries:
             if e["book"] == pref:
                 return e
     return entries[0]
+
+
+def _lookup_all_books(lines, player_name, market):
+    """Return dict of {book_display: entry} for all books with a line."""
+    norm = _normalize_name(player_name)
+    entries = lines.get((norm, market), [])
+    result = {}
+    for e in entries:
+        bk = BOOK_DISPLAY.get(e["book"], e["book"])
+        if bk not in result:
+            result[bk] = e
+    return result
 
 
 def _format_american(price):
@@ -414,8 +500,12 @@ def run_daily_picks():
             print(f"  {b['name']:<25} {b['h_proj']:.2f} H/G  "
                   f"({b['team']} vs {b['opp_pitcher']})")
 
-    # --- Fetch odds lines ---
+    # --- Fetch odds lines (DK/FD + Underdog) ---
     odds_lines = fetch_odds_lines()
+    ud_lines = fetch_underdog_lines()
+    # Merge: add Underdog lines to existing dict
+    for key, entries in ud_lines.items():
+        odds_lines.setdefault(key, []).extend(entries)
 
     # --- Attach line info to picks ---
     _attach_k_lines(k_picks, odds_lines)
