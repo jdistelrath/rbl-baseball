@@ -192,6 +192,60 @@
       <canvas id="pnlChart"></canvas>
     </div>
   </div>
+
+  <div class="card" style="margin-top:12px">
+    <h2>HR List Backtest</h2>
+    <p style="color:var(--muted);font-size:0.8rem;margin-bottom:12px">
+      If you bet the top N HR picks every day, how often would at least one homer?
+    </p>
+    <div class="bt-row">
+      <div class="bt-field">
+        <label>Start Year</label>
+        <select id="hrStartYear">
+          <option value="2022">2022</option>
+          <option value="2023">2023</option>
+          <option value="2024" selected>2024</option>
+          <option value="2025">2025</option>
+        </select>
+      </div>
+      <div class="bt-field">
+        <label>End Year</label>
+        <select id="hrEndYear">
+          <option value="2022">2022</option>
+          <option value="2023">2023</option>
+          <option value="2024" selected>2024</option>
+          <option value="2025">2025</option>
+        </select>
+      </div>
+      <div class="bt-field">
+        <label>Top N</label>
+        <select id="hrTopN">
+          <option value="1">1</option>
+          <option value="3">3</option>
+          <option value="5" selected>5</option>
+          <option value="10">10</option>
+        </select>
+      </div>
+      <button id="hrRun" onclick="runHrBacktest()">Run HR Backtest</button>
+    </div>
+
+    <div id="hrLoading"></div>
+
+    <div class="bt-stats" id="hrStats" style="display:none">
+      <div class="bt-stat"><div class="val" id="hrDays">-</div><div class="lbl">Days</div></div>
+      <div class="bt-stat"><div class="val" id="hrDayHit">-</div><div class="lbl">Days w/ HR</div></div>
+      <div class="bt-stat"><div class="val" id="hrBets">-</div><div class="lbl">Total Bets</div></div>
+      <div class="bt-stat"><div class="val" id="hrWinRate">-</div><div class="lbl">Win Rate</div></div>
+      <div class="bt-stat"><div class="val" id="hrPnl">-</div><div class="lbl">P&L</div></div>
+      <div class="bt-stat"><div class="val" id="hrRoi">-</div><div class="lbl">ROI</div></div>
+      <div class="bt-stat"><div class="val" id="hrBest">-</div><div class="lbl">Best Month</div></div>
+      <div class="bt-stat"><div class="val" id="hrWorst">-</div><div class="lbl">Worst Month</div></div>
+    </div>
+
+    <div id="hrChartWrap" style="display:none">
+      <canvas id="hrPnlChart"></canvas>
+    </div>
+  </div>
 </div>
 
 <script>
@@ -373,6 +427,84 @@ async function runBacktest() {
   } catch (e) {
     if (e.name === 'AbortError') {
       loading.textContent = 'Backtest timed out (>10 min). Try CLI: python main.py backtest_props';
+    } else {
+      loading.textContent = 'Error: ' + e.message;
+    }
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---- HR List Backtest ---- */
+let hrChart = null;
+
+async function runHrBacktest() {
+  const btn = document.getElementById('hrRun');
+  const loading = document.getElementById('hrLoading');
+  btn.disabled = true;
+  loading.innerHTML = '<span class="spinner"></span> Running HR backtest (may take 1-5 min)...';
+  document.getElementById('hrStats').style.display = 'none';
+  document.getElementById('hrChartWrap').style.display = 'none';
+
+  const params = {
+    start_year: document.getElementById('hrStartYear').value,
+    end_year: document.getElementById('hrEndYear').value,
+    top_n: document.getElementById('hrTopN').value,
+  };
+
+  try {
+    const controller = new AbortController();
+    const tid = setTimeout(() => controller.abort(), 600000);
+    const resp = await fetch('/api/backtest_hr', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(params), signal: controller.signal,
+    });
+    clearTimeout(tid);
+    const d = await resp.json();
+    if (d.error) { loading.textContent = 'Error: ' + d.error; return; }
+
+    document.getElementById('hrDays').textContent = d.total_days;
+    document.getElementById('hrDayHit').textContent = d.days_with_hr + ' (' + d.day_hit_rate + '%)';
+    document.getElementById('hrBets').textContent = d.total_bets;
+    document.getElementById('hrWinRate').textContent = d.win_rate + '%';
+    document.getElementById('hrPnl').textContent = '$' + d.pnl.toFixed(2);
+    document.getElementById('hrPnl').style.color = d.pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    document.getElementById('hrRoi').textContent = d.roi + '%';
+    document.getElementById('hrRoi').style.color = d.roi >= 0 ? 'var(--green)' : 'var(--red)';
+    document.getElementById('hrBest').textContent = d.best_month;
+    document.getElementById('hrWorst').textContent = d.worst_month;
+    document.getElementById('hrStats').style.display = 'grid';
+
+    // P&L Chart
+    if (hrChart) hrChart.destroy();
+    document.getElementById('hrChartWrap').style.display = 'block';
+    const ctx = document.getElementById('hrPnlChart').getContext('2d');
+    hrChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: d.chart_labels,
+        datasets: [{
+          label: 'HR List P&L ($)',
+          data: d.chart_data,
+          borderColor: d.chart_data[d.chart_data.length-1] >= 0 ? '#3fb950' : '#f85149',
+          backgroundColor: 'transparent',
+          tension: 0.3, pointRadius: 0, borderWidth: 2,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#8b949e', maxTicksLimit: 12, font: { size: 10 } }, grid: { color: '#30363d' } },
+          y: { ticks: { color: '#8b949e', callback: v => '$' + v }, grid: { color: '#30363d' } },
+        }
+      }
+    });
+
+    loading.textContent = '';
+  } catch (e) {
+    if (e.name === 'AbortError') {
+      loading.textContent = 'HR backtest timed out (>10 min).';
     } else {
       loading.textContent = 'Error: ' + e.message;
     }

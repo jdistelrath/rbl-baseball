@@ -55,6 +55,22 @@ def api_picks():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/backtest_hr", methods=["POST"])
+def api_backtest_hr():
+    """Run HR list daily backtest and return JSON results."""
+    try:
+        params = request.get_json(force=True)
+        print(f"[api/backtest_hr] Running with params: {params}")
+        data = _run_hr_backtest(params)
+        print(f"[api/backtest_hr] Complete: {data.get('total_bets', 0)} bets, "
+              f"PnL=${data.get('pnl', 0):.2f}")
+        return jsonify(data)
+    except Exception as e:
+        print(f"[api/backtest_hr] EXCEPTION: {e}")
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/backtest", methods=["POST"])
 def api_backtest():
     """Run strategy backtester and return JSON results."""
@@ -221,6 +237,177 @@ def _run_picks_pipeline():
 # ---------------------------------------------------------------------------
 # Strategy backtester
 # ---------------------------------------------------------------------------
+
+def _run_hr_backtest(params):
+    """
+    HR List daily backtest: for each game-day, rank batters by calibrated HR prob,
+    pick top N, check if any homered. Track individual bet P&L at -110.
+    """
+    start_year = int(params.get("start_year", 2024))
+    end_year = int(params.get("end_year", start_year))
+    top_n = int(params.get("top_n", 5))
+
+    from backtest_props import (
+        _fetch_batter_game_logs, _fetch_batter_handedness,
+        _build_team_pitcher_hr9, _project_hr_prob, _calibrate_hr_prob,
+    )
+    from collections import defaultdict
+
+    STAKE = 1.0
+    PAYOUT = 0.909  # profit on a win at -110
+
+    results_by_week = {}
+    total_bets = 0
+    total_wins = 0
+    total_pnl = 0.0
+    total_days = 0
+    days_with_hr = 0
+
+    years = list(range(start_year, end_year + 1))
+
+    for year in years:
+        print(f"[api/backtest_hr] Processing {year}...")
+        batter_df = get_batter_statcast(season=year - 1)
+        pitcher_df = get_pitcher_statcast(season=year - 1)
+
+        if batter_df.empty or "PA" not in batter_df.columns:
+            continue
+
+        team_pitcher_hr9 = _build_team_pitcher_hr9(pitcher_df)
+
+        # Get qualified batters and their HR projections
+        qualified = batter_df[batter_df["PA"] >= 200].copy()
+        if qualified.empty:
+            continue
+
+        player_ids = qualified["mlbID"].astype(int).tolist()
+        handedness = _fetch_batter_handedness(player_ids)
+
+        # Score each batter's HR prob (using neutral context — no per-game matchup)
+        batter_scores = []
+        for _, row in qualified.iterrows():
+            pid = int(row["mlbID"])
+            name = row["Name"]
+            bat_side = handedness.get(pid, "R")
+            # Use league-average opponent for ranking
+            raw_prob = _project_hr_prob(row, "", team_pitcher_hr9, bat_side, True, "")
+            if raw_prob is None or raw_prob < 0.01:
+                continue
+            cal_prob = _calibrate_hr_prob(raw_prob)
+            batter_scores.append({
+                "pid": pid, "name": name, "cal_prob": cal_prob,
+            })
+
+        batter_scores.sort(key=lambda x: x["cal_prob"], reverse=True)
+        top_batters = batter_scores[:top_n]
+
+        if not top_batters:
+            continue
+
+        print(f"  Top {top_n}: {', '.join(b['name'] for b in top_batters[:3])}...")
+
+        # Fetch game logs for top N batters, bucket by date
+        daily_results = defaultdict(dict)  # date -> {pid: homered}
+
+        for b in top_batters:
+            import requests as _req
+            url = (
+                f"https://statsapi.mlb.com/api/v1/people/{b['pid']}/stats"
+                f"?stats=gameLog&group=hitting&season={year}&gameType=R"
+            )
+            try:
+                resp = _req.get(url, timeout=15)
+                resp.raise_for_status()
+                splits = resp.json().get("stats", [{}])[0].get("splits", [])
+            except Exception:
+                continue
+
+            for s in splits:
+                stat = s.get("stat", {})
+                ab = int(stat.get("atBats", 0))
+                if ab == 0:
+                    continue
+                game_date = s.get("date", "")
+                hr = int(stat.get("homeRuns", 0))
+                daily_results[game_date][b["pid"]] = hr > 0
+
+        # Score each day
+        for game_date in sorted(daily_results.keys()):
+            day_data = daily_results[game_date]
+            if not day_data:
+                continue
+
+            total_days += 1
+            any_hr = False
+
+            for pid, homered in day_data.items():
+                total_bets += 1
+                if homered:
+                    total_wins += 1
+                    total_pnl += STAKE * PAYOUT
+                    any_hr = True
+                else:
+                    total_pnl -= STAKE
+
+            if any_hr:
+                days_with_hr += 1
+
+            # Weekly P&L
+            try:
+                dt = datetime.strptime(game_date, "%Y-%m-%d")
+                week_key = dt.strftime("%Y-W%W")
+                day_pnl = sum(
+                    (STAKE * PAYOUT) if h else -STAKE for h in day_data.values()
+                )
+                results_by_week.setdefault(week_key, 0.0)
+                results_by_week[week_key] += day_pnl
+            except (ValueError, TypeError):
+                pass
+
+    win_rate = total_wins / total_bets * 100 if total_bets > 0 else 0
+    roi = total_pnl / (total_bets * STAKE) * 100 if total_bets > 0 else 0
+    day_hit_rate = days_with_hr / total_days * 100 if total_days > 0 else 0
+
+    # Chart data
+    weeks_sorted = sorted(results_by_week.keys())
+    cum = 0.0
+    chart_labels = []
+    chart_data = []
+    for w in weeks_sorted:
+        cum += results_by_week[w]
+        chart_labels.append(w)
+        chart_data.append(round(cum, 2))
+
+    # Best/worst month
+    monthly = {}
+    for w, pnl in results_by_week.items():
+        try:
+            dt = datetime.strptime(w + "-1", "%Y-W%W-%w")
+            month = dt.strftime("%Y-%m")
+        except (ValueError, TypeError):
+            month = w[:7]
+        monthly.setdefault(month, 0.0)
+        monthly[month] += pnl
+
+    best_month = max(monthly, key=monthly.get) if monthly else "N/A"
+    worst_month = min(monthly, key=monthly.get) if monthly else "N/A"
+
+    return {
+        "total_days": total_days,
+        "days_with_hr": days_with_hr,
+        "day_hit_rate": round(day_hit_rate, 1),
+        "total_bets": total_bets,
+        "total_wins": total_wins,
+        "win_rate": round(win_rate, 1),
+        "pnl": round(total_pnl, 2),
+        "roi": round(roi, 1),
+        "best_month": f"{best_month} (${monthly.get(best_month, 0):.2f})" if monthly else "N/A",
+        "worst_month": f"{worst_month} (${monthly.get(worst_month, 0):.2f})" if monthly else "N/A",
+        "chart_labels": chart_labels,
+        "chart_data": chart_data,
+        "top_n": top_n,
+    }
+
 
 def _run_backtest(params):
     prop_type = params.get("prop_type", "pitcher_strikeouts")
