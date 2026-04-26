@@ -415,7 +415,7 @@ def mode_backtest_props():
     """Backtest prop projections against actual game outcomes."""
     print("[main] === Prop Projection Backtest ===")
     from backtest_props import run_props_backtest
-    run_props_backtest(years=[2024, 2025])
+    run_props_backtest(years=[2022, 2023, 2024, 2025])
 
 
 def mode_prop_ev():

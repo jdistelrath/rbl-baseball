@@ -146,7 +146,7 @@ def run_props_backtest(years=None):
     Uses prior-year season stats for projections (no lookahead).
     """
     if years is None:
-        years = [2024, 2025]
+        years = [2022, 2023, 2024, 2025]
 
     from data_fetcher import get_batter_statcast, get_pitcher_statcast
 
