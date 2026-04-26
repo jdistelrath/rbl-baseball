@@ -77,7 +77,7 @@
   <div class="card" id="topCard" style="margin-top:12px;border-color:var(--green);display:none">
     <h2 style="color:var(--green)">Top Plays (Edge > 10%)</h2>
     <table><thead><tr>
-      <th>Player</th><th>Type</th><th>Book</th><th>Model</th><th>Impl</th><th>Edge</th><th>Matchup</th>
+      <th>Player</th><th>Type</th><th>Book</th><th>Model</th><th>Impl</th><th>Edge</th><th>Bet Size</th><th>Matchup</th>
     </tr></thead><tbody id="topBody"></tbody></table>
   </div>
 
@@ -318,7 +318,8 @@ async function loadPicks() {
       if ((p.edge||0) > 0.10) allPlays.push({
         name: p.name, type: 'Ks O' + p.book_line, book: bookStr,
         model: pctFmt(p.model_prob), impl: pctFmt(p.book_impl),
-        edge: p.edge, note: p.note
+        edge: p.edge, note: p.note,
+        kelly_frac: p.kelly_frac, kelly_bet: p.kelly_bet
       });
     });
     if (!kWithLine.length) kb.innerHTML = '<tr><td colspan="9" style="color:var(--muted)">No K lines available</td></tr>';
@@ -332,7 +333,8 @@ async function loadPicks() {
         batRows.push({
           name: b.name, team: b.team, opp: b.opp_pitcher,
           label: label, line: b[mkt+'_line'], price: b[mkt+'_price'],
-          book: b[mkt+'_book'], model: b[mkt+'_model'], impl: b[mkt+'_impl'], edge: edge
+          book: b[mkt+'_book'], model: b[mkt+'_model'], impl: b[mkt+'_impl'], edge: edge,
+          kelly_frac: b[mkt+'_kelly_frac'] || 0, kelly_bet: b[mkt+'_kelly_bet'] || 0
         });
       }
     });
@@ -352,7 +354,8 @@ async function loadPicks() {
       bb.appendChild(tr);
       if (r.edge > 0.10) allPlays.push({
         name: r.name, type: r.label + ' O' + r.line, book: bookStr,
-        model: pctFmt(r.model), impl: pctFmt(r.impl), edge: r.edge, note: 'vs ' + r.opp
+        model: pctFmt(r.model), impl: pctFmt(r.impl), edge: r.edge, note: 'vs ' + r.opp,
+        kelly_frac: r.kelly_frac, kelly_bet: r.kelly_bet
       });
     });
     if (!batRows.length) bb.innerHTML = '<tr><td colspan="8" style="color:var(--muted)">No batter prop lines available</td></tr>';
@@ -365,11 +368,15 @@ async function loadPicks() {
     if (allPlays.length) {
       topCard.style.display = 'block';
       allPlays.forEach(p => {
+        const kellyStr = p.kelly_bet > 0
+          ? '$' + p.kelly_bet.toFixed(2) + ' (' + (p.kelly_frac * 100).toFixed(1) + '% Kelly)'
+          : '—';
         const tr = document.createElement('tr');
         tr.innerHTML = '<td><b>' + p.name + '</b></td><td>' + p.type + '</td>' +
           '<td>' + p.book + '</td>' +
           '<td>' + p.model + '</td><td>' + p.impl + '</td>' +
           '<td class="edge-green">' + edgeFmt(p.edge) + '</td>' +
+          '<td style="color:var(--green);font-weight:600">' + kellyStr + '</td>' +
           '<td style="color:var(--muted);font-size:0.8rem">' + p.note + '</td>';
         topBody.appendChild(tr);
       });

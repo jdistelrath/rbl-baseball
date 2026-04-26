@@ -5,6 +5,7 @@ Run: python app.py   (serves on localhost:5050)
 
 import json
 import math
+import os
 import traceback
 from datetime import date, datetime, timedelta
 
@@ -211,6 +212,43 @@ def _run_picks_pipeline():
             else:
                 b[f"{short}_book"] = None
                 b[f"{short}_edge"] = 0
+
+    # Kelly sizing
+    bankroll = float(os.environ.get("BANKROLL", "100"))
+    kelly_cap = 0.05  # max 5% of bankroll per bet
+
+    def _kelly(model_prob, american_odds):
+        """Kelly fraction capped at kelly_cap."""
+        if american_odds > 0:
+            dec = (american_odds / 100.0) + 1.0
+        else:
+            dec = (100.0 / abs(american_odds)) + 1.0
+        b = dec - 1.0
+        if b <= 0:
+            return 0.0, 0.0
+        q = 1.0 - model_prob
+        f = (model_prob * b - q) / b
+        f = max(0.0, min(f, kelly_cap))
+        return round(f, 4), round(f * bankroll, 2)
+
+    for p in k_picks:
+        if p.get("book") and p.get("model_prob"):
+            f, bet = _kelly(p["model_prob"], p["book_price"])
+            p["kelly_frac"] = f
+            p["kelly_bet"] = bet
+        else:
+            p["kelly_frac"] = 0
+            p["kelly_bet"] = 0
+
+    for b in batter_picks:
+        for mkt in ["hits", "total_bases", "home_runs"]:
+            if b.get(f"{mkt}_book") and b.get(f"{mkt}_model"):
+                f, bet = _kelly(b[f"{mkt}_model"], b[f"{mkt}_price"])
+                b[f"{mkt}_kelly_frac"] = f
+                b[f"{mkt}_kelly_bet"] = bet
+            else:
+                b[f"{mkt}_kelly_frac"] = 0
+                b[f"{mkt}_kelly_bet"] = 0
 
     # Build HR list: top 10 batters by calibrated HR probability
     hr_list = sorted(batter_picks, key=lambda x: x.get("hr_prob", 0), reverse=True)[:10]
