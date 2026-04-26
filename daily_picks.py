@@ -10,6 +10,7 @@ import math
 from datetime import date
 
 import requests
+from scipy.stats import poisson
 
 from config import CFG
 from backtest_props import (
@@ -17,6 +18,133 @@ from backtest_props import (
     _calibrate_hr_prob, _project_hr_prob, _build_team_pitcher_hr9,
     K_BIAS_CORRECTION,
 )
+
+# ---------------------------------------------------------------------------
+# Odds API helpers
+# ---------------------------------------------------------------------------
+
+ODDS_MARKETS = [
+    "pitcher_strikeouts",
+    "batter_hits",
+    "batter_total_bases",
+    "batter_home_runs",
+]
+ODDS_BOOKS = ["draftkings", "fanduel"]
+BOOK_DISPLAY = {"draftkings": "DK", "fanduel": "FD"}
+
+
+def _american_to_implied(price):
+    """Convert American odds to implied probability (no-vig)."""
+    if price < 0:
+        return abs(price) / (abs(price) + 100)
+    return 100 / (price + 100)
+
+
+def _poisson_over_prob(lam, line):
+    """P(X > line) using Poisson CDF.  line is typically x.5."""
+    return 1 - poisson.cdf(math.floor(line), lam)
+
+
+def fetch_odds_lines():
+    """Fetch today's MLB player prop lines from The Odds API.
+
+    Returns dict keyed by (normalized_name, market) -> list of
+    {book, line, price, implied_prob, name_raw}.
+    """
+    api_key = CFG.odds_api_key
+    if not api_key:
+        print("[odds] THE_ODDS_API_KEY not set — skipping line lookup")
+        return {}
+
+    # Step 1: get today's event IDs
+    events_url = "https://api.the-odds-api.com/v4/sports/baseball_mlb/events"
+    resp = requests.get(events_url, params={"apiKey": api_key}, timeout=15)
+    resp.raise_for_status()
+    events = resp.json()
+
+    if not events:
+        print("[odds] No MLB events found today")
+        return {}
+
+    print(f"[odds] Found {len(events)} MLB events, fetching player props...")
+
+    lines = {}  # (norm_name, market) -> [line_entries]
+
+    for event in events:
+        eid = event["id"]
+        props_url = (
+            f"https://api.the-odds-api.com/v4/sports/baseball_mlb/events/{eid}/odds"
+        )
+        try:
+            r = requests.get(props_url, params={
+                "apiKey": api_key,
+                "regions": "us",
+                "markets": ",".join(ODDS_MARKETS),
+                "oddsFormat": "american",
+                "bookmakers": ",".join(ODDS_BOOKS),
+            }, timeout=15)
+            r.raise_for_status()
+        except requests.RequestException as exc:
+            print(f"[odds] Failed to fetch props for event {eid}: {exc}")
+            continue
+
+        data = r.json()
+        for bk in data.get("bookmakers", []):
+            book_key = bk["key"]
+            if book_key not in ODDS_BOOKS:
+                continue
+            for mkt in bk.get("markets", []):
+                market_key = mkt["key"]
+                for outcome in mkt.get("outcomes", []):
+                    if outcome["name"] != "Over":
+                        continue
+                    player_raw = outcome.get("description", "")
+                    if not player_raw:
+                        continue
+                    norm = _normalize_name(player_raw)
+                    point = outcome.get("point")
+                    price = outcome.get("price")
+                    if point is None or price is None:
+                        continue
+                    key = (norm, market_key)
+                    entry = {
+                        "book": book_key,
+                        "line": point,
+                        "price": price,
+                        "implied_prob": _american_to_implied(price),
+                        "name_raw": player_raw,
+                    }
+                    lines.setdefault(key, []).append(entry)
+
+    print(f"[odds] Loaded {len(lines)} player/market lines")
+    return lines
+
+
+def _normalize_name(name):
+    """Lowercase, strip suffixes like Jr./III, collapse whitespace."""
+    n = name.lower().strip()
+    for suffix in (" jr.", " jr", " sr.", " sr", " ii", " iii", " iv"):
+        if n.endswith(suffix):
+            n = n[: -len(suffix)].strip()
+    return " ".join(n.split())
+
+
+def _lookup_line(lines, player_name, market):
+    """Find best book line for a player+market.  Prefer DK, then FD."""
+    norm = _normalize_name(player_name)
+    entries = lines.get((norm, market), [])
+    if not entries:
+        return None
+    for pref in ODDS_BOOKS:
+        for e in entries:
+            if e["book"] == pref:
+                return e
+    return entries[0]
+
+
+def _format_american(price):
+    """Format American odds with sign."""
+    return f"+{price}" if price > 0 else str(price)
 
 
 # ---------------------------------------------------------------------------
@@ -243,13 +371,92 @@ def run_daily_picks():
     print(f"[daily_picks] {len(games)} games, {confirmed_games} with lineups")
     print(f"[daily_picks] {len(k_picks)} K projections, {len(batter_picks)} batter projections")
 
+    # Debug: top 10 batters by H/G projection
+    if batter_picks:
+        by_h = sorted(batter_picks, key=lambda x: x["h_proj"], reverse=True)
+        print(f"[daily_picks] Top 10 by Hits projection:")
+        for b in by_h[:10]:
+            print(f"  {b['name']:<25} {b['h_proj']:.2f} H/G  "
+                  f"({b['team']} vs {b['opp_pitcher']})")
+
+    # --- Fetch odds lines ---
+    odds_lines = fetch_odds_lines()
+
+    # --- Attach line info to picks ---
+    _attach_k_lines(k_picks, odds_lines)
+    _attach_batter_lines(batter_picks, odds_lines)
+
     # --- Generate sharp brief ---
     _write_sharp_brief(k_picks, batter_picks, today)
 
-    # --- Generate floor list ---
+    # --- Generate floor list (only players with lines) ---
     _write_floor_list(k_picks, batter_picks, today)
 
     print(f"[daily_picks] Output written to outputs/sharp_brief.txt and outputs/floor_list.txt")
+
+
+def _attach_k_lines(k_picks, odds_lines):
+    """Attach book line, implied prob, and model edge to each K pick."""
+    for p in k_picks:
+        entry = _lookup_line(odds_lines, p["name"], "pitcher_strikeouts")
+        if entry:
+            p["book"] = BOOK_DISPLAY.get(entry["book"], entry["book"])
+            p["book_line"] = entry["line"]
+            p["book_price"] = entry["price"]
+            p["book_impl"] = entry["implied_prob"]
+            p["model_prob"] = _poisson_over_prob(p["proj_k"], entry["line"])
+            p["edge"] = p["model_prob"] - p["book_impl"]
+            p["has_line"] = True
+        else:
+            p["has_line"] = False
+
+
+def _attach_batter_lines(batter_picks, odds_lines):
+    """Attach book lines for hits, TB, and HR markets to each batter pick."""
+    market_map = [
+        ("batter_hits", "h_proj"),
+        ("batter_total_bases", "tb_proj"),
+        ("batter_home_runs", None),  # HR uses hr_prob directly
+    ]
+    for b in batter_picks:
+        b["has_any_line"] = False
+        for market, proj_key in market_map:
+            short = market.replace("batter_", "")  # hits, total_bases, home_runs
+            entry = _lookup_line(odds_lines, b["name"], market)
+            if entry:
+                b[f"{short}_book"] = BOOK_DISPLAY.get(entry["book"], entry["book"])
+                b[f"{short}_line"] = entry["line"]
+                b[f"{short}_price"] = entry["price"]
+                b[f"{short}_impl"] = entry["implied_prob"]
+                if market == "batter_home_runs":
+                    # hr_prob is already P(>=1 HR) which equals P(over 0.5)
+                    b[f"{short}_model"] = b["hr_prob"]
+                else:
+                    lam = b[proj_key]
+                    b[f"{short}_model"] = _poisson_over_prob(lam, entry["line"])
+                b[f"{short}_edge"] = b[f"{short}_model"] - b[f"{short}_impl"]
+                b["has_any_line"] = True
+            else:
+                b[f"{short}_book"] = None
+
+
+def _format_k_line(p):
+    """Format line availability string for a K pick."""
+    if not p.get("has_line"):
+        return "NO LINE -- model only"
+    return (f"{p['book']} O{p['book_line']} ({_format_american(p['book_price'])})  "
+            f"model {p['model_prob']:.0%} vs impl {p['book_impl']:.0%}  "
+            f"edge {p['edge']:+.1%}")
+
+
+def _format_batter_line(b, market):
+    """Format line availability string for a batter market."""
+    if b.get(f"{market}_book") is None:
+        return "NO LINE -- model only"
+    return (f"{b[f'{market}_book']} O{b[f'{market}_line']} "
+            f"({_format_american(b[f'{market}_price'])})  "
+            f"model {b[f'{market}_model']:.0%} vs impl {b[f'{market}_impl']:.0%}  "
+            f"edge {b[f'{market}_edge']:+.1%}")
 
 
 def _write_sharp_brief(k_picks, batter_picks, today):
@@ -272,8 +479,9 @@ def _write_sharp_brief(k_picks, batter_picks, today):
         lines.append("  OVER 6.5 Ks:")
         for p in over_65[:5]:
             conf = "HIGH" if p["proj_k"] >= 7.5 else "MED"
+            line_str = _format_k_line(p)
             lines.append(f"    {p['name']:<22} proj {p['proj_k']:>4} Ks  "
-                         f"K/9 {p['k9']:>4}  [{conf}]  {p['note']}")
+                         f"K/9 {p['k9']:>4}  [{conf}]  {line_str}  {p['note']}")
 
     # Over 4.5 candidates (proj > 4.5, exclude those already in 6.5)
     over_45 = [p for p in k_sorted if 4.5 < p["proj_k"] <= 6.5]
@@ -282,8 +490,9 @@ def _write_sharp_brief(k_picks, batter_picks, today):
         lines.append("  OVER 4.5 Ks:")
         for p in over_45[:5]:
             conf = "HIGH" if p["proj_k"] >= 5.5 else "MED"
+            line_str = _format_k_line(p)
             lines.append(f"    {p['name']:<22} proj {p['proj_k']:>4} Ks  "
-                         f"K/9 {p['k9']:>4}  [{conf}]  {p['note']}")
+                         f"K/9 {p['k9']:>4}  [{conf}]  {line_str}  {p['note']}")
 
     lines.append("")
 
@@ -296,8 +505,9 @@ def _write_sharp_brief(k_picks, batter_picks, today):
     if over_15h:
         for b in over_15h[:8]:
             conf = "HIGH" if b["h_proj"] >= 1.8 else "MED"
+            line_str = _format_batter_line(b, "hits")
             lines.append(f"    {b['name']:<22} proj {b['h_proj']:>4} H/G  "
-                         f"[{conf}]  {b['note']}")
+                         f"[{conf}]  {line_str}  {b['note']}")
     else:
         lines.append("    No batters projecting over 1.5 H/G today")
     lines.append("")
@@ -311,8 +521,9 @@ def _write_sharp_brief(k_picks, batter_picks, today):
     if over_25tb:
         for b in over_25tb[:8]:
             conf = "HIGH" if b["tb_proj"] >= 3.0 else "MED"
+            line_str = _format_batter_line(b, "total_bases")
             lines.append(f"    {b['name']:<22} proj {b['tb_proj']:>4} TB/G  "
-                         f"[{conf}]  {b['note']}")
+                         f"[{conf}]  {line_str}  {b['note']}")
     else:
         lines.append("    No batters projecting over 2.5 TB/G today")
     lines.append("")
@@ -329,8 +540,9 @@ def _write_sharp_brief(k_picks, batter_picks, today):
         if b["hr_prob"] < 0.05:
             break
         conf = "HIGH" if b["hr_prob"] >= 0.18 else "MED" if b["hr_prob"] >= 0.14 else "LOW"
+        line_str = _format_batter_line(b, "home_runs")
         lines.append(f"    {b['name']:<22} {b['hr_prob']:>5.1%} HR prob  "
-                     f"PF {b['park_factor']:.2f}  [{conf}]  {b['note']}")
+                     f"PF {b['park_factor']:.2f}  [{conf}]  {line_str}  {b['note']}")
 
     lines.append("")
     lines.append(f"Generated: {today}")
@@ -343,18 +555,25 @@ def _write_sharp_brief(k_picks, batter_picks, today):
 
 
 def _write_floor_list(k_picks, batter_picks, today):
-    """Write the floor list: top 10 names ranked by composite score."""
+    """Write the floor list: top 10 names ranked by composite score.
+
+    Only includes players where at least one book line was found.
+    """
     out_dir = CFG.outputs_dir
     out_dir.mkdir(exist_ok=True)
 
+    # Filter to players with at least one book line
+    batters_with_lines = [b for b in batter_picks if b.get("has_any_line")]
+    ks_with_lines = [p for p in k_picks if p.get("has_line")]
+
     # Composite score for batters: normalize each metric to 0-1 and average
     scored = []
-    if batter_picks:
-        max_h = max(b["h_proj"] for b in batter_picks) or 1
-        max_tb = max(b["tb_proj"] for b in batter_picks) or 1
-        max_hr = max(b["hr_prob"] for b in batter_picks) or 1
+    if batters_with_lines:
+        max_h = max(b["h_proj"] for b in batters_with_lines) or 1
+        max_tb = max(b["tb_proj"] for b in batters_with_lines) or 1
+        max_hr = max(b["hr_prob"] for b in batters_with_lines) or 1
 
-        for b in batter_picks:
+        for b in batters_with_lines:
             composite = (
                 (b["h_proj"] / max_h) * 0.30 +
                 (b["tb_proj"] / max_tb) * 0.35 +
@@ -363,10 +582,10 @@ def _write_floor_list(k_picks, batter_picks, today):
             scored.append((b["name"], b["team"], composite))
 
     # Add K pitchers with a normalized score
-    if k_picks:
-        max_k = max(p["proj_k"] for p in k_picks) or 1
-        for p in k_picks:
-            composite = (p["proj_k"] / max_k) * 0.80  # K pitchers score slightly lower weight
+    if ks_with_lines:
+        max_k = max(p["proj_k"] for p in ks_with_lines) or 1
+        for p in ks_with_lines:
+            composite = (p["proj_k"] / max_k) * 0.80
             scored.append((p["name"], p["team"], composite))
 
     scored.sort(key=lambda x: x[2], reverse=True)
@@ -375,7 +594,10 @@ def _write_floor_list(k_picks, batter_picks, today):
     for i, (name, team, _) in enumerate(scored[:10], 1):
         lines.append(f"{i}. {name}")
 
+    if not lines:
+        lines.append("No players with available book lines today.")
+
     text = "\n".join(lines)
     with open(out_dir / "floor_list.txt", "w") as f:
         f.write(text)
-    print(f"[daily_picks] floor_list.txt written ({len(lines)} names)")
+    print(f"[daily_picks] floor_list.txt written ({len(lines)} names, lines-only filter)")
