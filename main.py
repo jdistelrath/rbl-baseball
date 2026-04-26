@@ -206,8 +206,11 @@ def _run_prop_ev_pipeline(games, parcels, dry_run=False):
 
     # HR prop EV
     hr_ev_plays = []
-    if scored_batters and hr_prop_lines:
-        hr_ev_plays = market_hr_ev.score_hr_props(scored_batters, hr_prop_lines)
+    if hr_prop_lines:
+        batter_df = data_fetcher.get_batter_statcast()
+        hr_ev_plays = market_hr_ev.score_hr_props(
+            scored_batters, hr_prop_lines, batter_df=batter_df
+        )
         print(f"[main] HR +EV plays: {len(hr_ev_plays)}")
     else:
         print("[main] No HR prop lines or scored batters available.")
