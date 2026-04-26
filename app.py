@@ -57,6 +57,54 @@ def api_picks():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/log_picks", methods=["POST"])
+def api_log_picks():
+    """Log today's picks snapshot for CLV tracking."""
+    try:
+        from clv_tracker import log_snapshot
+        data = _run_picks_pipeline()
+        count = log_snapshot(data["k_picks"], data["batter_picks"])
+        return jsonify({"logged": count})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/close_lines", methods=["POST"])
+def api_close_lines():
+    """Pull closing lines for today's logged picks."""
+    try:
+        from clv_tracker import close_lines
+        closed = close_lines()
+        return jsonify({"closed": closed})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/update_outcomes", methods=["POST"])
+def api_update_outcomes():
+    """Update actual outcomes for logged picks."""
+    try:
+        from clv_tracker import update_outcomes
+        updated = update_outcomes()
+        return jsonify({"updated": updated})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/clv_data")
+def api_clv_data():
+    """Return CLV tracking data for the CLV Tracker tab."""
+    try:
+        from clv_tracker import get_clv_summary
+        return jsonify(get_clv_summary())
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/parlay_builder")
 def api_parlay_builder():
     """Return today's eligible legs with model probs and book odds for the parlay builder."""

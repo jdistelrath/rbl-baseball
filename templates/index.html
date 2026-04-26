@@ -81,12 +81,14 @@
 <div class="tabs">
   <div class="tab active" onclick="switchTab('picks')">Daily Picks</div>
   <div class="tab" onclick="switchTab('parlay')">Parlay Builder</div>
+  <div class="tab" onclick="switchTab('clv')">CLV Tracker</div>
   <div class="tab" onclick="switchTab('backtest')">Strategy Backtester</div>
 </div>
 
 <!-- ============ DAILY PICKS ============ -->
 <div id="picks" class="panel active">
   <button id="refreshBtn" onclick="loadPicks()">Refresh Picks</button>
+  <button onclick="logPicks()" style="margin-left:8px;background:var(--yellow);color:#000">Log Today's Picks</button>
   <div style="margin-top:12px" id="picksLoading"></div>
 
   <div class="card" id="topCard" style="margin-top:12px;border-color:var(--green);display:none">
@@ -145,6 +147,63 @@
       <div id="pWarn" style="color:var(--yellow);font-size:0.8rem;display:none"></div>
       <button onclick="copyParlay()" style="margin-left:auto">Copy Parlay</button>
     </div>
+  </div>
+</div>
+
+<!-- ============ CLV TRACKER ============ -->
+<div id="clv" class="panel">
+  <div class="card">
+    <h2>Closing Line Value Tracker</h2>
+    <p style="color:var(--muted);font-size:0.8rem;margin-bottom:12px">
+      CLV is the real edge metric. Positive avg CLV over 50+ bets = sharp model.
+    </p>
+    <div style="display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap">
+      <button onclick="closeLines()">Pull Closing Lines</button>
+      <button onclick="updateOutcomes()">Update Outcomes</button>
+      <button onclick="loadClv()">Refresh</button>
+      <span id="clvStatus" style="color:var(--muted);font-size:0.8rem;align-self:center"></span>
+    </div>
+
+    <div class="bt-stats" id="clvStats" style="display:none">
+      <div class="bt-stat"><div class="val" id="clvLogged">-</div><div class="lbl">Logged</div></div>
+      <div class="bt-stat"><div class="val" id="clvAvg">-</div><div class="lbl">Avg CLV</div></div>
+      <div class="bt-stat"><div class="val" id="clvPosPct">-</div><div class="lbl">CLV+ Rate</div></div>
+      <div class="bt-stat"><div class="val" id="clvWinRate">-</div><div class="lbl">Win Rate</div></div>
+      <div class="bt-stat"><div class="val" id="clvPnl">-</div><div class="lbl">Total P&L</div></div>
+      <div class="bt-stat"><div class="val" id="clvOutcomes">-</div><div class="lbl">Outcomes</div></div>
+    </div>
+
+    <div style="display:flex;gap:16px;flex-wrap:wrap;margin:12px 0" id="clvBreakdowns" style="display:none">
+      <div id="clvByType" class="card" style="flex:1;min-width:200px"></div>
+      <div id="clvByBook" class="card" style="flex:1;min-width:200px"></div>
+    </div>
+
+    <div id="clvChartWrap" style="max-height:200px;display:none">
+      <canvas id="clvHistChart"></canvas>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h2>Pick Log</h2>
+    <div style="display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap">
+      <select id="clvFilterType" onchange="renderClvTable()" style="padding:4px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.8rem">
+        <option value="all">All Types</option>
+        <option value="Ks">Ks</option><option value="Hits">Hits</option>
+        <option value="TB">TB</option><option value="HR">HR</option>
+      </select>
+      <select id="clvFilterBook" onchange="renderClvTable()" style="padding:4px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.8rem">
+        <option value="all">All Books</option>
+        <option value="DK">DK</option><option value="FD">FD</option><option value="UD">UD</option>
+      </select>
+      <select id="clvFilterClv" onchange="renderClvTable()" style="padding:4px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.8rem">
+        <option value="all">All CLV</option>
+        <option value="positive">CLV+</option><option value="negative">CLV-</option>
+      </select>
+    </div>
+    <table><thead><tr>
+      <th>Date</th><th>Player</th><th>Prop</th><th>Line</th><th>Open</th><th>Close</th>
+      <th>CLV</th><th>Result</th><th>P&L</th>
+    </tr></thead><tbody id="clvBody"></tbody></table>
   </div>
 </div>
 
@@ -821,8 +880,150 @@ function copyParlay() {
   navigator.clipboard.writeText(text).then(() => alert('Copied to clipboard!'));
 }
 
+/* ---- CLV Tracker ---- */
+let _clvData = null;
+
+async function logPicks() {
+  try {
+    const resp = await fetch('/api/log_picks', { method: 'POST' });
+    const d = await resp.json();
+    alert('Logged ' + (d.logged || 0) + ' picks for CLV tracking');
+  } catch (e) { alert('Error: ' + e.message); }
+}
+
+async function closeLines() {
+  const s = document.getElementById('clvStatus');
+  s.textContent = 'Pulling closing lines...';
+  try {
+    const resp = await fetch('/api/close_lines', { method: 'POST' });
+    const d = await resp.json();
+    s.textContent = 'Closed ' + (d.closed || 0) + ' lines';
+    loadClv();
+  } catch (e) { s.textContent = 'Error: ' + e.message; }
+}
+
+async function updateOutcomes() {
+  const s = document.getElementById('clvStatus');
+  s.textContent = 'Updating outcomes...';
+  try {
+    const resp = await fetch('/api/update_outcomes', { method: 'POST' });
+    const d = await resp.json();
+    s.textContent = 'Updated ' + (d.updated || 0) + ' outcomes';
+    loadClv();
+  } catch (e) { s.textContent = 'Error: ' + e.message; }
+}
+
+async function loadClv() {
+  try {
+    const resp = await fetch('/api/clv_data');
+    _clvData = await resp.json();
+    renderClvStats(_clvData.stats);
+    renderClvTable();
+    renderClvChart(_clvData.stats);
+  } catch (e) { console.error('CLV load error:', e); }
+}
+
+function renderClvStats(st) {
+  if (!st || !st.total_logged) {
+    document.getElementById('clvStats').style.display = 'none';
+    return;
+  }
+  document.getElementById('clvStats').style.display = 'grid';
+  document.getElementById('clvLogged').textContent = st.total_logged;
+  document.getElementById('clvAvg').textContent = st.avg_clv !== undefined ? (st.avg_clv > 0 ? '+' : '') + (st.avg_clv * 100).toFixed(1) + '%' : '—';
+  document.getElementById('clvAvg').style.color = (st.avg_clv || 0) >= 0 ? 'var(--green)' : 'var(--red)';
+  document.getElementById('clvPosPct').textContent = st.positive_clv_pct !== undefined ? st.positive_clv_pct + '%' : '—';
+  document.getElementById('clvWinRate').textContent = st.win_rate !== undefined ? st.win_rate + '%' : '—';
+  document.getElementById('clvPnl').textContent = st.total_pnl !== undefined ? '$' + st.total_pnl.toFixed(2) : '—';
+  if (st.total_pnl !== undefined) document.getElementById('clvPnl').style.color = st.total_pnl >= 0 ? 'var(--green)' : 'var(--red)';
+  document.getElementById('clvOutcomes').textContent = st.with_outcome || 0;
+
+  // Breakdowns
+  const byType = document.getElementById('clvByType');
+  if (st.clv_by_type) {
+    let h = '<h3 style="font-size:0.85rem;color:var(--blue);margin-bottom:4px">CLV by Type</h3>';
+    for (const [t, v] of Object.entries(st.clv_by_type)) {
+      const c = v >= 0 ? 'var(--green)' : 'var(--red)';
+      h += '<div style="font-size:0.8rem">' + t + ': <span style="color:'+c+';font-weight:600">' + (v > 0 ? '+' : '') + (v*100).toFixed(1) + '%</span></div>';
+    }
+    byType.innerHTML = h;
+  }
+  const byBook = document.getElementById('clvByBook');
+  if (st.clv_by_book) {
+    let h = '<h3 style="font-size:0.85rem;color:var(--blue);margin-bottom:4px">CLV by Book</h3>';
+    for (const [b, v] of Object.entries(st.clv_by_book)) {
+      const c = v >= 0 ? 'var(--green)' : 'var(--red)';
+      h += '<div style="font-size:0.8rem">' + b + ': <span style="color:'+c+';font-weight:600">' + (v > 0 ? '+' : '') + (v*100).toFixed(1) + '%</span></div>';
+    }
+    byBook.innerHTML = h;
+  }
+}
+
+let _clvChart = null;
+function renderClvChart(st) {
+  if (!st || !st.histogram) {
+    document.getElementById('clvChartWrap').style.display = 'none';
+    return;
+  }
+  document.getElementById('clvChartWrap').style.display = 'block';
+  if (_clvChart) _clvChart.destroy();
+  const labels = Object.keys(st.histogram).map(k => (parseFloat(k)*100).toFixed(0) + '%');
+  const values = Object.values(st.histogram);
+  const colors = Object.keys(st.histogram).map(k => parseFloat(k) >= 0 ? '#3fb950' : '#f85149');
+  const ctx = document.getElementById('clvHistChart').getContext('2d');
+  _clvChart = new Chart(ctx, {
+    type: 'bar',
+    data: { labels, datasets: [{ data: values, backgroundColor: colors }] },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { title: { display: true, text: 'CLV', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#30363d' } },
+        y: { title: { display: true, text: 'Count', color: '#8b949e' }, ticks: { color: '#8b949e' }, grid: { color: '#30363d' } },
+      }
+    }
+  });
+}
+
+function renderClvTable() {
+  if (!_clvData) return;
+  const filterType = document.getElementById('clvFilterType').value;
+  const filterBook = document.getElementById('clvFilterBook').value;
+  const filterClv = document.getElementById('clvFilterClv').value;
+
+  let rows = _clvData.entries || [];
+  if (filterType !== 'all') rows = rows.filter(e => e.prop_type === filterType);
+  if (filterBook !== 'all') rows = rows.filter(e => e.book === filterBook);
+  if (filterClv === 'positive') rows = rows.filter(e => (e.clv || 0) > 0);
+  if (filterClv === 'negative') rows = rows.filter(e => (e.clv || 0) < 0);
+
+  const body = document.getElementById('clvBody');
+  body.innerHTML = '';
+  rows.forEach(e => {
+    const clvVal = e.clv !== null ? e.clv : null;
+    const clvStr = clvVal !== null ? (clvVal > 0 ? '+' : '') + (clvVal * 100).toFixed(1) + '%' : '—';
+    const clvColor = clvVal === null ? 'var(--muted)' : clvVal >= 0 ? 'var(--green)' : 'var(--red)';
+    const outcomeStr = e.outcome || '—';
+    const outcomeColor = e.outcome === 'W' ? 'var(--green)' : e.outcome === 'L' ? 'var(--red)' : 'var(--muted)';
+    const pnlStr = e.pnl !== null ? (e.pnl >= 0 ? '+' : '') + '$' + (e.pnl || 0).toFixed(2) : '—';
+    const tr = document.createElement('tr');
+    tr.innerHTML =
+      '<td style="font-size:0.8rem">' + e.date + '</td>' +
+      '<td><b>' + e.player + '</b></td>' +
+      '<td>' + e.prop_type + '</td>' +
+      '<td>O' + e.line + '</td>' +
+      '<td style="font-size:0.8rem">' + e.book + ' ' + oddsFmt(e.opening_odds) + '</td>' +
+      '<td style="font-size:0.8rem">' + (e.closing_odds ? oddsFmt(e.closing_odds) : '—') + '</td>' +
+      '<td style="color:' + clvColor + ';font-weight:600">' + clvStr + '</td>' +
+      '<td style="color:' + outcomeColor + ';font-weight:600">' + outcomeStr + '</td>' +
+      '<td style="font-size:0.8rem">' + pnlStr + '</td>';
+    body.appendChild(tr);
+  });
+  if (!rows.length) body.innerHTML = '<tr><td colspan="9" style="color:var(--muted)">No picks logged yet. Click "Log Today\'s Picks" to start tracking.</td></tr>';
+}
+
 /* ---- Auto-load on page load ---- */
-window.addEventListener('DOMContentLoaded', () => { loadKellyConfig(); loadPicks(); loadParlay(); });
+window.addEventListener('DOMContentLoaded', () => { loadKellyConfig(); loadPicks(); loadParlay(); loadClv(); });
 
 /* ---- Update line options when prop type changes ---- */
 const lineOptions = {
