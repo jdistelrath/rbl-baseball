@@ -14,6 +14,44 @@ import requests
 
 from config import CFG
 
+# ---------------------------------------------------------------------------
+# Park HR factors (FanGraphs-derived, 1.0 = neutral)
+# ---------------------------------------------------------------------------
+
+PARK_HR_FACTOR = {
+    "Coors Field": 1.38, "Great American Ball Park": 1.18, "Yankee Stadium": 1.15,
+    "Globe Life Field": 1.12, "Citizens Bank Park": 1.10, "Wrigley Field": 1.08,
+    "Fenway Park": 1.07, "Guaranteed Rate Field": 1.06, "Minute Maid Park": 1.05,
+    "Dodger Stadium": 1.04, "Truist Park": 1.03, "Rogers Centre": 1.03,
+    "Angel Stadium": 1.02, "Oriole Park at Camden Yards": 1.02, "Target Field": 1.01,
+    "Citi Field": 1.00, "PNC Park": 0.99, "American Family Field": 0.99,
+    "Busch Stadium": 0.98, "Comerica Park": 0.97, "Chase Field": 0.97,
+    "Progressive Field": 0.96, "Kauffman Stadium": 0.96, "T-Mobile Park": 0.95,
+    "Nationals Park": 0.95, "loanDepot park": 0.94, "Petco Park": 0.93,
+    "Tropicana Field": 0.92, "Oracle Park": 0.90, "Oakland Coliseum": 0.88,
+    "RingCentral Coliseum": 0.88,
+}
+
+# MLB team name -> home stadium mapping
+TEAM_STADIUM = {
+    "Colorado Rockies": "Coors Field", "Cincinnati Reds": "Great American Ball Park",
+    "New York Yankees": "Yankee Stadium", "Texas Rangers": "Globe Life Field",
+    "Philadelphia Phillies": "Citizens Bank Park", "Chicago Cubs": "Wrigley Field",
+    "Boston Red Sox": "Fenway Park", "Chicago White Sox": "Guaranteed Rate Field",
+    "Houston Astros": "Minute Maid Park", "Los Angeles Dodgers": "Dodger Stadium",
+    "Atlanta Braves": "Truist Park", "Toronto Blue Jays": "Rogers Centre",
+    "Los Angeles Angels": "Angel Stadium", "Baltimore Orioles": "Oriole Park at Camden Yards",
+    "Minnesota Twins": "Target Field", "New York Mets": "Citi Field",
+    "Pittsburgh Pirates": "PNC Park", "Milwaukee Brewers": "American Family Field",
+    "St. Louis Cardinals": "Busch Stadium", "Detroit Tigers": "Comerica Park",
+    "Arizona Diamondbacks": "Chase Field", "Cleveland Guardians": "Progressive Field",
+    "Kansas City Royals": "Kauffman Stadium", "Seattle Mariners": "T-Mobile Park",
+    "Washington Nationals": "Nationals Park", "Miami Marlins": "loanDepot park",
+    "San Diego Padres": "Petco Park", "Tampa Bay Rays": "Tropicana Field",
+    "San Francisco Giants": "Oracle Park", "Athletics": "Oakland Coliseum",
+    "Oakland Athletics": "Oakland Coliseum",
+}
+
 
 # ---------------------------------------------------------------------------
 # Cache helpers (reuse data_fetcher pattern)
@@ -140,6 +178,272 @@ def _project_batter_rates(batter_row):
 
 
 # ---------------------------------------------------------------------------
+# HR prop model
+# ---------------------------------------------------------------------------
+
+def _fetch_batter_handedness(player_ids):
+    """Batch fetch bat side for a list of player IDs. Returns dict {id: 'L'/'R'/'S'}."""
+    cache_key = f"batter_handedness_{hash(tuple(sorted(player_ids)))}"
+    cached = _load_cache(cache_key)
+    if cached is not None:
+        return cached
+
+    result = {}
+    # Batch in groups of 50
+    for i in range(0, len(player_ids), 50):
+        batch = player_ids[i:i+50]
+        ids_str = ",".join(str(pid) for pid in batch)
+        url = f"https://statsapi.mlb.com/api/v1/people?personIds={ids_str}"
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            for p in resp.json().get("people", []):
+                result[p["id"]] = p.get("batSide", {}).get("code", "R")
+        except Exception:
+            continue
+
+    _save_cache(cache_key, result)
+    return result
+
+
+def _build_team_pitcher_hr9(pitcher_df):
+    """Build team-level pitcher HR/9 from season stats. Returns dict {team_name: hr9}."""
+    if pitcher_df.empty:
+        return {}
+
+    team_hr = {}
+    team_ip = {}
+    for _, row in pitcher_df.iterrows():
+        team = row.get("Team", "")
+        if not team:
+            continue
+        try:
+            hr = int(row.get("HR", 0))
+            ip = float(row.get("IP", 0))
+        except (TypeError, ValueError):
+            continue
+        if ip < 10:
+            continue
+        team_hr.setdefault(team, 0)
+        team_ip.setdefault(team, 0.0)
+        team_hr[team] += hr
+        team_ip[team] += ip
+
+    result = {}
+    for team in team_hr:
+        if team_ip[team] > 0:
+            result[team] = (team_hr[team] / team_ip[team]) * 9.0
+    return result
+
+
+def _project_hr_prob(batter_row, opp_team, team_pitcher_hr9, bat_side,
+                     is_home, opp_team_name):
+    """
+    Project probability of hitting at least 1 HR in a game.
+
+    Inputs:
+        - Batter HR/PA rate (from prior-year season stats)
+        - Opposing team pitcher HR/9 (higher = more HR-prone)
+        - Park HR factor
+        - Platoon adjustment (LHB vs RHP staff, etc.)
+
+    Returns float probability (0-1) or None.
+    """
+    try:
+        hr = int(batter_row.get("HR", 0))
+        pa = int(batter_row.get("PA", 0))
+    except (TypeError, ValueError):
+        return None
+    if pa < 100:
+        return None
+
+    # Base HR/PA rate
+    hr_per_pa = hr / pa
+
+    # Expected PA per game (~3.8-4.2 for starters)
+    try:
+        g = int(batter_row.get("G", 0))
+        total_pa = int(batter_row.get("PA", 0))
+    except (TypeError, ValueError):
+        return None
+    pa_per_game = total_pa / max(g, 1) if g > 0 else 3.9
+
+    # Base probability of at least 1 HR in a game
+    # P(>=1 HR) = 1 - P(0 HR) = 1 - (1 - hr_per_pa)^pa_per_game
+    base_prob = 1.0 - (1.0 - hr_per_pa) ** pa_per_game
+
+    # Adjustment 1: opposing team pitcher HR/9
+    # League avg HR/9 ~1.25. Scale linearly.
+    league_avg_hr9 = 1.25
+    opp_hr9 = team_pitcher_hr9.get(opp_team_name, league_avg_hr9)
+    pitcher_mult = opp_hr9 / league_avg_hr9 if league_avg_hr9 > 0 else 1.0
+    pitcher_mult = max(0.5, min(2.0, pitcher_mult))  # clamp
+
+    # Adjustment 2: park factor
+    if is_home:
+        home_team = None
+        # Find home team from opponent
+        for _, r in []:
+            pass
+        # Use opp_team for away games, need home team for park
+        stadium = TEAM_STADIUM.get(opp_team_name, "") if not is_home else ""
+    # Simpler: use home team's stadium
+    # is_home tells us if the batter's team is home
+    batter_team = batter_row.get("Team", "")
+    if is_home:
+        stadium = TEAM_STADIUM.get(batter_team, "")
+    else:
+        stadium = TEAM_STADIUM.get(opp_team_name, "")
+    park_factor = PARK_HR_FACTOR.get(stadium, 1.0)
+
+    # Adjustment 3: platoon (simplified -- team-level, not per-pitcher)
+    # LHB gets ~10% boost (more RHP starters in MLB)
+    # Switch hitters get ~5% boost
+    if bat_side == "L":
+        platoon_mult = 1.08
+    elif bat_side == "S":
+        platoon_mult = 1.04
+    else:
+        platoon_mult = 1.0
+
+    # Combined probability
+    adjusted_prob = base_prob * pitcher_mult * park_factor * platoon_mult
+
+    # Clamp to realistic range
+    return max(0.0, min(0.60, adjusted_prob))
+
+
+def _backtest_batter_hr(year, batter_df, pitcher_df):
+    """Backtest HR prop projections vs 0.5 line."""
+    cache_key = f"props_bt_batter_hr_{year}"
+    cached = _load_cache(cache_key)
+
+    if cached is not None:
+        results = cached
+        print(f"  [HR] Using cached results ({len(results)} games)")
+    else:
+        if "HR" not in batter_df.columns or "PA" not in batter_df.columns:
+            print("  [HR] HR or PA column missing. Skipping.")
+            return
+
+        qualified = batter_df[batter_df["PA"] >= 200].copy()
+        print(f"  [HR] Testing {len(qualified)} batters...")
+
+        # Build team pitcher HR/9 lookup from prior-year pitching stats
+        team_pitcher_hr9 = _build_team_pitcher_hr9(pitcher_df)
+
+        # Fetch handedness for all batters
+        player_ids = qualified["mlbID"].astype(int).tolist()
+        handedness = _fetch_batter_handedness(player_ids)
+
+        results = []
+        for _, row in qualified.iterrows():
+            pid = int(row["mlbID"])
+            name = row["Name"]
+            bat_side = handedness.get(pid, "R")
+
+            game_logs = _fetch_batter_game_logs(pid, year)
+            if not game_logs:
+                continue
+
+            # We need opponent team per game -- re-fetch with opponent info
+            gl_url = (
+                f"https://statsapi.mlb.com/api/v1/people/{pid}/stats"
+                f"?stats=gameLog&group=hitting&season={year}&gameType=R"
+            )
+            try:
+                resp = requests.get(gl_url, timeout=15)
+                resp.raise_for_status()
+                splits = resp.json().get("stats", [{}])[0].get("splits", [])
+            except Exception:
+                continue
+
+            for s in splits:
+                stat = s.get("stat", {})
+                ab = int(stat.get("atBats", 0))
+                if ab == 0:
+                    continue
+
+                opp_name = s.get("opponent", {}).get("name", "")
+                is_home = s.get("isHome", False)
+                actual_hr = int(stat.get("homeRuns", 0))
+
+                proj = _project_hr_prob(
+                    row, opp_name, team_pitcher_hr9, bat_side,
+                    is_home, opp_name
+                )
+                if proj is None:
+                    continue
+
+                results.append({
+                    "name": name,
+                    "projected_prob": round(proj, 4),
+                    "actual_hr": actual_hr,
+                    "homered": actual_hr > 0,
+                    "date": s.get("date", ""),
+                    "opponent": opp_name,
+                    "is_home": is_home,
+                })
+
+        _save_cache(cache_key, results)
+        print(f"  [HR] Fetched {len(results)} games")
+
+    if not results:
+        print("  [HR] No data.")
+        return
+
+    df = pd.DataFrame(results)
+
+    # Directional accuracy vs 0.5 line (model prob > 50% => predict HR)
+    # But HR is rare (~10-15% of games), so use the raw probability
+    # as a score and check calibration
+
+    # Method: for each game, model says "over 0.5 HR" if projected_prob > threshold
+    # The right threshold is the base rate. But for DK props, the line is always 0.5
+    # and the question is: does a higher model prob correlate with more actual HRs?
+
+    actual_hr_rate = df["homered"].mean()
+    print(f"  [HR] Base HR rate: {actual_hr_rate:.1%} ({df['homered'].sum()}/{len(df)})")
+
+    # Split into quintiles by projected prob and check HR rate in each
+    df["prob_bin"] = pd.qcut(df["projected_prob"], q=5, duplicates="drop")
+    bin_stats = df.groupby("prob_bin", observed=True).agg(
+        games=("homered", "count"),
+        hrs=("homered", "sum"),
+        avg_proj=("projected_prob", "mean"),
+    )
+    bin_stats["actual_rate"] = bin_stats["hrs"] / bin_stats["games"]
+
+    print("  [HR] Calibration by quintile:")
+    print(f"       {'Bin':<24} {'Games':>6} {'HRs':>5} {'Proj':>6} {'Actual':>7}")
+    for idx, row in bin_stats.iterrows():
+        print(f"       {str(idx):<24} {int(row['games']):>6} {int(row['hrs']):>5} "
+              f"{row['avg_proj']:>6.1%} {row['actual_rate']:>7.1%}")
+
+    # Overall bias: mean projected prob vs actual HR rate
+    bias = df["projected_prob"].mean() - actual_hr_rate
+    mae = (df["projected_prob"] - df["homered"].astype(float)).abs().mean()
+
+    # Directional: if we bet OVER on top 20% of projections, what's the hit rate?
+    top_20_threshold = df["projected_prob"].quantile(0.80)
+    top_picks = df[df["projected_prob"] >= top_20_threshold]
+    top_hr_rate = top_picks["homered"].mean() if len(top_picks) > 0 else 0
+
+    bottom_20_threshold = df["projected_prob"].quantile(0.20)
+    bottom_picks = df[df["projected_prob"] <= bottom_20_threshold]
+    bottom_hr_rate = bottom_picks["homered"].mean() if len(bottom_picks) > 0 else 0
+
+    print(f"  [HR] Top 20% picks: {top_hr_rate:.1%} HR rate "
+          f"({top_picks['homered'].sum()}/{len(top_picks)})")
+    print(f"  [HR] Bottom 20%: {bottom_hr_rate:.1%} HR rate "
+          f"({bottom_picks['homered'].sum()}/{len(bottom_picks)})")
+    print(f"  [HR] Lift: {top_hr_rate/max(bottom_hr_rate, 0.001):.1f}x "
+          f"(top vs bottom quintile)")
+    print(f"  [HR] MAE: {mae:.4f} | Bias: {bias:+.4f}")
+    print(f"  [HR] Games analyzed: {len(df)}")
+
+
+# ---------------------------------------------------------------------------
 # Main backtest runner
 # ---------------------------------------------------------------------------
 
@@ -177,6 +481,9 @@ def run_props_backtest(years=None):
 
         # --- Batter Total Bases ---
         _backtest_batter_tb(year, batter_df)
+
+        # --- Batter HR Props ---
+        _backtest_batter_hr(year, batter_df, pitcher_df)
 
 
 def _backtest_pitcher_ks(year, pitcher_df):
