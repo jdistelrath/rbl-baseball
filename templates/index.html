@@ -29,6 +29,7 @@
   td { padding:6px 8px; border-bottom:1px solid var(--border); }
   .edge-green { color:var(--green); font-weight:600; }
   .edge-yellow { color:var(--yellow); font-weight:600; }
+  .edge-red { color:var(--red); font-weight:600; }
   .edge-gray { color:var(--muted); }
   .edge-none { color:var(--muted); font-style:italic; }
   .floor-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:8px; }
@@ -73,6 +74,13 @@
   <button id="refreshBtn" onclick="loadPicks()">Refresh Picks</button>
   <div style="margin-top:12px" id="picksLoading"></div>
 
+  <div class="card" id="topCard" style="margin-top:12px;border-color:var(--green);display:none">
+    <h2 style="color:var(--green)">Top Plays (Edge > 10%)</h2>
+    <table><thead><tr>
+      <th>Player</th><th>Type</th><th>Book</th><th>Model</th><th>Impl</th><th>Edge</th><th>Matchup</th>
+    </tr></thead><tbody id="topBody"></tbody></table>
+  </div>
+
   <div class="card" id="kCard" style="margin-top:12px">
     <h2>Pitcher K Props</h2>
     <table><thead><tr>
@@ -84,8 +92,8 @@
   <div class="card" id="batCard">
     <h2>Batter Props (Hits / TB / HR)</h2>
     <table><thead><tr>
-      <th>Batter</th><th>Team</th><th>H/G</th><th>TB/G</th><th>HR%</th>
-      <th>Best Edge</th><th>Book</th><th>vs</th>
+      <th>Batter</th><th>Team</th><th>Prop</th>
+      <th>Book</th><th>Model</th><th>Impl</th><th>Edge</th><th>vs</th>
     </tr></thead><tbody id="batBody"></tbody></table>
   </div>
 
@@ -260,8 +268,9 @@ function switchTab(id) {
 /* ---- Edge color ---- */
 function edgeCls(e) {
   if (e === null || e === undefined) return 'edge-none';
-  if (e > 0.05) return 'edge-green';
-  if (e > 0.02) return 'edge-yellow';
+  if (e > 0.10) return 'edge-green';
+  if (e > 0.05) return 'edge-yellow';
+  if (e > 0.02) return 'edge-red';
   return 'edge-gray';
 }
 function edgeFmt(e) {
@@ -288,12 +297,17 @@ async function loadPicks() {
     if (d.meta.lines_note) metaText += ' | ' + d.meta.lines_note;
     document.getElementById('metaLine').textContent = metaText;
 
-    // K picks table
+    // Collect all plays with book lines for Top Plays card
+    const allPlays = [];
+
+    // K picks: filter to book lines only, sort by edge desc
+    const kWithLine = d.k_picks.filter(p => p.book).sort((a,b) => (b.edge||0) - (a.edge||0));
     const kb = document.getElementById('kBody');
     kb.innerHTML = '';
-    d.k_picks.forEach(p => {
-      const bookStr = p.book ? p.book + ' O' + p.book_line + ' (' + oddsFmt(p.book_price) + ')' : '—';
+    kWithLine.forEach(p => {
+      const bookStr = p.book + ' O' + p.book_line + ' (' + oddsFmt(p.book_price) + ')';
       const tr = document.createElement('tr');
+      if ((p.edge||0) < 0.02) tr.style.opacity = '0.4';
       tr.innerHTML = '<td><b>' + p.name + '</b></td><td>' + p.team + '</td>' +
         '<td><b>' + p.proj_k + '</b></td><td>' + p.k9 + '</td>' +
         '<td>' + bookStr + '</td>' +
@@ -301,45 +315,82 @@ async function loadPicks() {
         '<td class="' + edgeCls(p.edge) + '">' + edgeFmt(p.edge) + '</td>' +
         '<td style="color:var(--muted);font-size:0.8rem">' + p.note + '</td>';
       kb.appendChild(tr);
+      if ((p.edge||0) > 0.10) allPlays.push({
+        name: p.name, type: 'Ks O' + p.book_line, book: bookStr,
+        model: pctFmt(p.model_prob), impl: pctFmt(p.book_impl),
+        edge: p.edge, note: p.note
+      });
     });
+    if (!kWithLine.length) kb.innerHTML = '<tr><td colspan="9" style="color:var(--muted)">No K lines available</td></tr>';
 
-    // Batter picks table
+    // Batter picks: expand each market as separate row, filter to book lines only
+    const batRows = [];
+    d.batter_picks.forEach(b => {
+      for (const [mkt, label] of [['hits','Hits'],['total_bases','TB'],['home_runs','HR']]) {
+        if (!b[mkt+'_book']) continue;
+        const edge = b[mkt+'_edge'] || 0;
+        batRows.push({
+          name: b.name, team: b.team, opp: b.opp_pitcher,
+          label: label, line: b[mkt+'_line'], price: b[mkt+'_price'],
+          book: b[mkt+'_book'], model: b[mkt+'_model'], impl: b[mkt+'_impl'], edge: edge
+        });
+      }
+    });
+    batRows.sort((a,b) => b.edge - a.edge);
     const bb = document.getElementById('batBody');
     bb.innerHTML = '';
-    d.batter_picks.slice(0, 30).forEach(b => {
-      // Find best edge across markets
-      let bestEdge = 0, bestMkt = '—', bestBook = '—';
-      for (const m of ['hits', 'total_bases', 'home_runs']) {
-        const e = b[m + '_edge'] || 0;
-        if (e > bestEdge) {
-          bestEdge = e;
-          bestMkt = m.replace('_', ' ').toUpperCase();
-          bestBook = (b[m + '_book'] || '') + ' O' + (b[m + '_line'] || '') +
-                     ' (' + oddsFmt(b[m + '_price'] || 0) + ')';
-        }
-      }
+    batRows.forEach(r => {
+      const bookStr = r.book + ' O' + r.line + ' (' + oddsFmt(r.price) + ')';
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td><b>' + b.name + '</b></td><td>' + b.team + '</td>' +
-        '<td>' + b.h_proj + '</td><td>' + b.tb_proj + '</td>' +
-        '<td>' + (b.hr_prob * 100).toFixed(1) + '%</td>' +
-        '<td class="' + edgeCls(bestEdge) + '">' + edgeFmt(bestEdge) +
-        ' <span style="font-size:0.75rem;color:var(--muted)">' + bestMkt + '</span></td>' +
-        '<td style="font-size:0.8rem">' + (bestEdge > 0 ? bestBook : '—') + '</td>' +
-        '<td style="color:var(--muted);font-size:0.8rem">vs ' + b.opp_pitcher + '</td>';
+      if (r.edge < 0.02) tr.style.opacity = '0.4';
+      tr.innerHTML = '<td><b>' + r.name + '</b></td><td>' + r.team + '</td>' +
+        '<td>' + r.label + '</td>' +
+        '<td>' + bookStr + '</td>' +
+        '<td>' + pctFmt(r.model) + '</td><td>' + pctFmt(r.impl) + '</td>' +
+        '<td class="' + edgeCls(r.edge) + '">' + edgeFmt(r.edge) + '</td>' +
+        '<td style="color:var(--muted);font-size:0.8rem">vs ' + r.opp + '</td>';
       bb.appendChild(tr);
+      if (r.edge > 0.10) allPlays.push({
+        name: r.name, type: r.label + ' O' + r.line, book: bookStr,
+        model: pctFmt(r.model), impl: pctFmt(r.impl), edge: r.edge, note: 'vs ' + r.opp
+      });
     });
+    if (!batRows.length) bb.innerHTML = '<tr><td colspan="8" style="color:var(--muted)">No batter prop lines available</td></tr>';
 
-    // HR list
+    // Top Plays card (green picks only)
+    const topCard = document.getElementById('topCard');
+    const topBody = document.getElementById('topBody');
+    topBody.innerHTML = '';
+    allPlays.sort((a,b) => b.edge - a.edge);
+    if (allPlays.length) {
+      topCard.style.display = 'block';
+      allPlays.forEach(p => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td><b>' + p.name + '</b></td><td>' + p.type + '</td>' +
+          '<td>' + p.book + '</td>' +
+          '<td>' + p.model + '</td><td>' + p.impl + '</td>' +
+          '<td class="edge-green">' + edgeFmt(p.edge) + '</td>' +
+          '<td style="color:var(--muted);font-size:0.8rem">' + p.note + '</td>';
+        topBody.appendChild(tr);
+      });
+    } else {
+      topCard.style.display = 'none';
+    }
+
+    // HR list: sort by hr_prob, show edge color based on prob level
     const fg = document.getElementById('floorGrid');
     fg.innerHTML = '';
-    (d.hr_list || []).forEach((f, i) => {
+    const hrSorted = (d.hr_list || []).sort((a,b) => (b.hr_prob||0) - (a.hr_prob||0));
+    hrSorted.forEach((f, i) => {
+      const prob = f.hr_prob || 0;
+      const probStr = prob ? (prob * 100).toFixed(1) + '%' : '—';
+      const color = prob > 0.20 ? 'var(--green)' : prob > 0.15 ? 'var(--yellow)' : prob > 0.10 ? 'var(--red)' : 'var(--muted)';
       const div = document.createElement('div');
       div.className = 'floor-card';
-      const prob = f.hr_prob ? (f.hr_prob * 100).toFixed(1) + '% HR' : '';
       div.innerHTML = '<div class="floor-rank">#' + (i + 1) + '</div>' +
         '<div class="floor-name">' + f.name + '</div>' +
         '<div class="floor-team">' + f.team + '</div>' +
-        '<div style="color:var(--green);font-size:0.8rem;margin-top:2px">' + prob + '</div>';
+        '<div style="color:' + color + ';font-size:0.85rem;font-weight:600;margin-top:2px">' + probStr + '</div>';
       fg.appendChild(div);
     });
 
