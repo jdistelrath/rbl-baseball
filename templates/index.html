@@ -61,7 +61,21 @@
 </head>
 <body>
 
-<h1>MLB Prop Model</h1>
+<div style="display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px">
+  <h1>MLB Prop Model</h1>
+  <div style="display:flex;gap:8px;align-items:center;font-size:0.8rem">
+    <label style="color:var(--muted)">Bankroll $</label>
+    <input type="number" id="cfgBankroll" value="100" step="10" style="width:65px;padding:4px 6px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.8rem" onchange="saveKellyConfig()">
+    <label style="color:var(--muted)">Kelly</label>
+    <select id="cfgKellyMode" style="padding:4px 6px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.8rem" onchange="saveKellyConfig()">
+      <option value="1">Full Kelly</option>
+      <option value="0.5">Half Kelly</option>
+      <option value="0.25" selected>Quarter Kelly</option>
+      <option value="custom">Custom Cap $</option>
+    </select>
+    <input type="number" id="cfgCustomCap" value="5" step="1" style="width:55px;padding:4px 6px;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:4px;font-size:0.8rem;display:none" onchange="saveKellyConfig()">
+  </div>
+</div>
 <div class="meta" id="metaLine">Loading...</div>
 
 <div class="tabs">
@@ -311,6 +325,73 @@ function edgeFmt(e) {
 function pctFmt(v) { return v ? (v * 100).toFixed(0) + '%' : '—'; }
 function oddsFmt(p) { return p > 0 ? '+' + p : '' + p; }
 
+/* ---- Kelly config ---- */
+function getKellyConfig() {
+  const bankroll = parseFloat(document.getElementById('cfgBankroll').value) || 100;
+  const mode = document.getElementById('cfgKellyMode').value;
+  let multiplier = parseFloat(mode) || 0.25;
+  let customCap = Infinity;
+  if (mode === 'custom') {
+    customCap = parseFloat(document.getElementById('cfgCustomCap').value) || 5;
+  }
+  return { bankroll, multiplier, customCap, mode };
+}
+
+function kellyBet(rawFrac) {
+  if (!rawFrac || rawFrac <= 0) return { frac: 0, bet: 0 };
+  const cfg = getKellyConfig();
+  let f = rawFrac;
+  if (cfg.mode !== 'custom') {
+    f = rawFrac * cfg.multiplier;
+  }
+  let bet = f * cfg.bankroll;
+  if (cfg.mode === 'custom') {
+    bet = Math.min(bet, cfg.customCap);
+    f = bet / cfg.bankroll;
+  }
+  return { frac: f, bet: bet };
+}
+
+function kellyFmt(rawFrac) {
+  const k = kellyBet(rawFrac);
+  if (k.bet <= 0) return '—';
+  return '$' + k.bet.toFixed(2) + ' (' + (rawFrac * 100).toFixed(1) + '% full)';
+}
+
+function saveKellyConfig() {
+  const cfg = getKellyConfig();
+  localStorage.setItem('kellyBankroll', cfg.bankroll);
+  localStorage.setItem('kellyMode', cfg.mode);
+  if (cfg.mode === 'custom') localStorage.setItem('kellyCap', cfg.customCap);
+  // Show/hide custom cap input
+  document.getElementById('cfgCustomCap').style.display = cfg.mode === 'custom' ? 'inline-block' : 'none';
+  // Re-render Kelly amounts in all visible picks
+  reRenderKelly();
+}
+
+function loadKellyConfig() {
+  const bankroll = localStorage.getItem('kellyBankroll');
+  const mode = localStorage.getItem('kellyMode');
+  const cap = localStorage.getItem('kellyCap');
+  if (bankroll) document.getElementById('cfgBankroll').value = bankroll;
+  if (mode) document.getElementById('cfgKellyMode').value = mode;
+  if (cap) document.getElementById('cfgCustomCap').value = cap;
+  document.getElementById('cfgCustomCap').style.display = mode === 'custom' ? 'inline-block' : 'none';
+}
+
+// Cache latest data for re-render on mode change
+let _lastPicks = null;
+
+function reRenderKelly() {
+  // Re-render Top Plays kelly column
+  document.querySelectorAll('[data-kelly-frac]').forEach(el => {
+    const frac = parseFloat(el.dataset.kellyFrac);
+    el.textContent = kellyFmt(frac);
+  });
+  // Re-render parlay summary kelly
+  if (typeof updateParlayMath === 'function') updateParlayMath();
+}
+
 /* ---- Load picks ---- */
 async function loadPicks() {
   const btn = document.getElementById('refreshBtn');
@@ -399,15 +480,12 @@ async function loadPicks() {
     if (allPlays.length) {
       topCard.style.display = 'block';
       allPlays.forEach(p => {
-        const kellyStr = p.kelly_bet > 0
-          ? '$' + p.kelly_bet.toFixed(2) + ' (' + (p.kelly_frac * 100).toFixed(1) + '% Kelly)'
-          : '—';
         const tr = document.createElement('tr');
         tr.innerHTML = '<td><b>' + p.name + '</b></td><td>' + p.type + '</td>' +
           '<td>' + p.book + '</td>' +
           '<td>' + p.model + '</td><td>' + p.impl + '</td>' +
           '<td class="edge-green">' + edgeFmt(p.edge) + '</td>' +
-          '<td style="color:var(--green);font-weight:600">' + kellyStr + '</td>' +
+          '<td style="color:var(--green);font-weight:600" data-kelly-frac="' + (p.kelly_frac||0) + '">' + kellyFmt(p.kelly_frac) + '</td>' +
           '<td style="color:var(--muted);font-size:0.8rem">' + p.note + '</td>';
         topBody.appendChild(tr);
       });
@@ -684,13 +762,15 @@ function updateParlayMath() {
   evEl.textContent = (ev >= 0 ? '+' : '') + '$' + ev.toFixed(2);
   evEl.style.color = ev >= 0 ? 'var(--green)' : 'var(--red)';
 
-  // Kelly for parlay
-  const b = combDec - 1;
-  const q = 1 - combProb;
-  let kf = b > 0 ? (combProb * b - q) / b : 0;
-  kf = Math.max(0, Math.min(kf, 0.05));
-  const bankroll = 100;
-  document.getElementById('pKelly').textContent = kf > 0 ? '$' + (kf * bankroll).toFixed(2) + ' (' + (kf*100).toFixed(1) + '%)' : '—';
+  // Kelly for parlay (uses selected mode)
+  const bp = combDec - 1;
+  const qp = 1 - combProb;
+  let rawKf = bp > 0 ? (combProb * bp - qp) / bp : 0;
+  rawKf = Math.max(0, rawKf);
+  const kResult = kellyBet(rawKf);
+  document.getElementById('pKelly').textContent = kResult.bet > 0
+    ? '$' + kResult.bet.toFixed(2) + ' (' + (rawKf*100).toFixed(1) + '% full)'
+    : '—';
 
   // Correlation warnings
   const players = sel.map(l => l.player);
@@ -739,7 +819,7 @@ function copyParlay() {
 }
 
 /* ---- Auto-load on page load ---- */
-window.addEventListener('DOMContentLoaded', () => { loadPicks(); loadParlay(); });
+window.addEventListener('DOMContentLoaded', () => { loadKellyConfig(); loadPicks(); loadParlay(); });
 
 /* ---- Update line options when prop type changes ---- */
 const lineOptions = {

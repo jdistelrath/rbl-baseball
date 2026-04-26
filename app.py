@@ -75,7 +75,6 @@ def api_parlay_builder():
                 "model_prob": p["model_prob"], "impl_prob": p["book_impl"],
                 "edge": p["edge"],
                 "kelly_frac": p.get("kelly_frac", 0),
-                "kelly_bet": p.get("kelly_bet", 0),
                 "note": p["note"],
             })
 
@@ -94,7 +93,6 @@ def api_parlay_builder():
                     "impl_prob": b.get(f"{mkt}_impl", 0),
                     "edge": edge,
                     "kelly_frac": b.get(f"{mkt}_kelly_frac", 0),
-                    "kelly_bet": b.get(f"{mkt}_kelly_bet", 0),
                     "note": f"vs {b['opp_pitcher']}",
                     "is_hr": mkt == "home_runs",
                 })
@@ -310,42 +308,32 @@ def _run_picks_pipeline():
                 b[f"{short}_book"] = None
                 b[f"{short}_edge"] = 0
 
-    # Kelly sizing
-    bankroll = float(os.environ.get("BANKROLL", "100"))
-    kelly_cap = 0.05  # max 5% of bankroll per bet
-
-    def _kelly(model_prob, american_odds):
-        """Kelly fraction capped at kelly_cap."""
+    # Kelly sizing — return raw fraction, client applies mode/cap
+    def _kelly_raw(model_prob, american_odds):
+        """Raw Kelly fraction (uncapped)."""
         if american_odds > 0:
             dec = (american_odds / 100.0) + 1.0
         else:
             dec = (100.0 / abs(american_odds)) + 1.0
         b = dec - 1.0
         if b <= 0:
-            return 0.0, 0.0
+            return 0.0
         q = 1.0 - model_prob
         f = (model_prob * b - q) / b
-        f = max(0.0, min(f, kelly_cap))
-        return round(f, 4), round(f * bankroll, 2)
+        return round(max(0.0, f), 4)
 
     for p in k_picks:
         if p.get("book") and p.get("model_prob"):
-            f, bet = _kelly(p["model_prob"], p["book_price"])
-            p["kelly_frac"] = f
-            p["kelly_bet"] = bet
+            p["kelly_frac"] = _kelly_raw(p["model_prob"], p["book_price"])
         else:
             p["kelly_frac"] = 0
-            p["kelly_bet"] = 0
 
     for b in batter_picks:
         for mkt in ["hits", "total_bases", "home_runs"]:
             if b.get(f"{mkt}_book") and b.get(f"{mkt}_model"):
-                f, bet = _kelly(b[f"{mkt}_model"], b[f"{mkt}_price"])
-                b[f"{mkt}_kelly_frac"] = f
-                b[f"{mkt}_kelly_bet"] = bet
+                b[f"{mkt}_kelly_frac"] = _kelly_raw(b[f"{mkt}_model"], b[f"{mkt}_price"])
             else:
                 b[f"{mkt}_kelly_frac"] = 0
-                b[f"{mkt}_kelly_bet"] = 0
 
     # Build HR list: top 10 batters by calibrated HR probability
     hr_list = sorted(batter_picks, key=lambda x: x.get("hr_prob", 0), reverse=True)[:10]
