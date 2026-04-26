@@ -192,7 +192,7 @@ def _run_picks_pipeline():
                 b[f"{short}_book"] = None
                 b[f"{short}_edge"] = 0
 
-    # Build floor list (composite score, players with any line)
+    # Build floor list (composite score)
     floor = []
     if batter_picks:
         max_h = max((b["h_proj"] for b in batter_picks), default=1) or 1
@@ -200,12 +200,16 @@ def _run_picks_pipeline():
         max_hr = max((b["hr_prob"] for b in batter_picks), default=1) or 0.01
         for b in batter_picks:
             score = (b["h_proj"]/max_h)*0.30 + (b["tb_proj"]/max_tb)*0.35 + (b["hr_prob"]/max_hr)*0.35
-            floor.append({"name": b["name"], "team": b["team"], "score": round(score, 3)})
+            floor.append({"name": b["name"], "team": b["team"], "type": "B", "score": round(score, 3)})
     if k_picks:
         max_k = max((p["proj_k"] for p in k_picks), default=1) or 1
         for p in k_picks:
-            floor.append({"name": p["name"], "team": p["team"], "score": round((p["proj_k"]/max_k)*0.8, 3)})
+            floor.append({"name": p["name"], "team": p["team"], "type": "P", "score": round((p["proj_k"]/max_k)*0.8, 3)})
     floor.sort(key=lambda x: x["score"], reverse=True)
+
+    lines_note = ""
+    if not odds_lines:
+        lines_note = "Lines available pre-game only. Check back tomorrow morning."
 
     return {
         "k_picks": sorted(k_picks, key=lambda x: x["proj_k"], reverse=True),
@@ -216,6 +220,7 @@ def _run_picks_pipeline():
             "games": len(games),
             "confirmed": confirmed,
             "odds_lines": len(odds_lines),
+            "lines_note": lines_note,
         },
     }
 

@@ -52,18 +52,25 @@ def fetch_odds_lines():
     {book, line, price, implied_prob, name_raw}.
     """
     api_key = CFG.odds_api_key
-    if not api_key:
+    if not api_key or api_key == "your_odds_api_key_here":
         print("[odds] THE_ODDS_API_KEY not set — skipping line lookup")
         return {}
 
     # Step 1: get today's event IDs
     events_url = "https://api.the-odds-api.com/v4/sports/baseball_mlb/events"
-    resp = requests.get(events_url, params={"apiKey": api_key}, timeout=15)
-    resp.raise_for_status()
-    events = resp.json()
+    try:
+        resp = requests.get(events_url, params={"apiKey": api_key}, timeout=15)
+        if resp.status_code == 401:
+            print("[odds] API key invalid or expired (401). Skipping line lookup.")
+            return {}
+        resp.raise_for_status()
+        events = resp.json()
+    except requests.RequestException as exc:
+        print(f"[odds] Events fetch failed: {exc}")
+        return {}
 
-    if not events:
-        print("[odds] No MLB events found today")
+    if not isinstance(events, list) or not events:
+        print("[odds] No MLB events found (games may have already started)")
         return {}
 
     print(f"[odds] Found {len(events)} MLB events, fetching player props...")
@@ -579,20 +586,21 @@ def _write_floor_list(k_picks, batter_picks, today):
                 (b["tb_proj"] / max_tb) * 0.35 +
                 (b["hr_prob"] / max_hr) * 0.35
             )
-            scored.append((b["name"], b["team"], composite))
+            scored.append((b["name"], b["team"], "B", composite))
 
     # Add K pitchers with a normalized score
     if ks_with_lines:
         max_k = max(p["proj_k"] for p in ks_with_lines) or 1
         for p in ks_with_lines:
             composite = (p["proj_k"] / max_k) * 0.80
-            scored.append((p["name"], p["team"], composite))
+            scored.append((p["name"], p["team"], "P", composite))
 
-    scored.sort(key=lambda x: x[2], reverse=True)
+    scored.sort(key=lambda x: x[3], reverse=True)
 
     lines = []
-    for i, (name, team, _) in enumerate(scored[:10], 1):
-        lines.append(f"{i}. {name}")
+    for i, (name, team, ptype, _) in enumerate(scored[:10], 1):
+        tag = "[P]" if ptype == "P" else "[B]"
+        lines.append(f"{i}. {tag} {name}")
 
     if not lines:
         lines.append("No players with available book lines today.")

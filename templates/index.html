@@ -180,9 +180,10 @@ async function loadPicks() {
     const d = await resp.json();
     if (d.error) { loading.textContent = 'Error: ' + d.error; return; }
 
-    document.getElementById('metaLine').textContent =
-      d.meta.date + ' | ' + d.meta.games + ' games (' + d.meta.confirmed +
+    let metaText = d.meta.date + ' | ' + d.meta.games + ' games (' + d.meta.confirmed +
       ' confirmed) | ' + d.meta.odds_lines + ' odds lines';
+    if (d.meta.lines_note) metaText += ' | ' + d.meta.lines_note;
+    document.getElementById('metaLine').textContent = metaText;
 
     // K picks table
     const kb = document.getElementById('kBody');
@@ -231,8 +232,11 @@ async function loadPicks() {
     d.floor_list.forEach((f, i) => {
       const div = document.createElement('div');
       div.className = 'floor-card';
+      const tag = f.type === 'P'
+        ? '<span style="color:var(--yellow);font-size:0.7rem">[P]</span> '
+        : '<span style="color:var(--blue);font-size:0.7rem">[B]</span> ';
       div.innerHTML = '<div class="floor-rank">#' + (i + 1) + '</div>' +
-        '<div class="floor-name">' + f.name + '</div>' +
+        '<div class="floor-name">' + tag + f.name + '</div>' +
         '<div class="floor-team">' + f.team + '</div>';
       fg.appendChild(div);
     });
