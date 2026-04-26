@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MLB Prop Model</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  :root { --bg:#0d1117; --card:#161b22; --border:#30363d; --text:#e6edf3;
+           --muted:#8b949e; --green:#3fb950; --yellow:#d29922; --red:#f85149;
+           --blue:#58a6ff; }
+  * { box-sizing:border-box; margin:0; padding:0; }
+  body { font-family:'Segoe UI',system-ui,sans-serif; background:var(--bg); color:var(--text);
+         line-height:1.5; padding:16px; max-width:1200px; margin:0 auto; }
+  h1 { font-size:1.4rem; margin-bottom:4px; }
+  .meta { color:var(--muted); font-size:0.85rem; margin-bottom:16px; }
+  .tabs { display:flex; gap:4px; margin-bottom:16px; }
+  .tab { padding:8px 20px; background:var(--card); border:1px solid var(--border);
+         border-radius:6px 6px 0 0; cursor:pointer; color:var(--muted); font-size:0.9rem; }
+  .tab.active { background:var(--border); color:var(--text); font-weight:600; }
+  .panel { display:none; }
+  .panel.active { display:block; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:8px;
+          padding:16px; margin-bottom:12px; }
+  .card h2 { font-size:1.05rem; margin-bottom:10px; color:var(--blue); }
+  table { width:100%; border-collapse:collapse; font-size:0.85rem; }
+  th { text-align:left; padding:6px 8px; border-bottom:2px solid var(--border);
+       color:var(--muted); font-size:0.8rem; text-transform:uppercase; }
+  td { padding:6px 8px; border-bottom:1px solid var(--border); }
+  .edge-green { color:var(--green); font-weight:600; }
+  .edge-yellow { color:var(--yellow); font-weight:600; }
+  .edge-gray { color:var(--muted); }
+  .edge-none { color:var(--muted); font-style:italic; }
+  .floor-grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(160px,1fr)); gap:8px; }
+  .floor-card { background:var(--bg); border:1px solid var(--border); border-radius:6px;
+                padding:10px 12px; text-align:center; }
+  .floor-rank { font-size:1.4rem; font-weight:700; color:var(--blue); }
+  .floor-name { font-size:0.9rem; margin-top:2px; }
+  .floor-team { font-size:0.75rem; color:var(--muted); }
+  button { padding:8px 16px; background:var(--blue); color:#fff; border:none;
+           border-radius:6px; cursor:pointer; font-size:0.85rem; }
+  button:hover { opacity:0.85; }
+  button:disabled { opacity:0.4; cursor:wait; }
+  .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--muted);
+             border-top-color:var(--blue); border-radius:50%; animation:spin .6s linear infinite; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .bt-row { display:flex; gap:12px; flex-wrap:wrap; align-items:end; margin-bottom:16px; }
+  .bt-field { display:flex; flex-direction:column; gap:2px; }
+  .bt-field label { font-size:0.75rem; color:var(--muted); text-transform:uppercase; }
+  .bt-field select, .bt-field input { padding:6px 10px; background:var(--bg); color:var(--text);
+     border:1px solid var(--border); border-radius:4px; font-size:0.85rem; }
+  .bt-stats { display:grid; grid-template-columns:repeat(auto-fill,minmax(140px,1fr)); gap:8px;
+              margin-bottom:16px; }
+  .bt-stat { background:var(--bg); border:1px solid var(--border); border-radius:6px;
+             padding:10px; text-align:center; }
+  .bt-stat .val { font-size:1.3rem; font-weight:700; }
+  .bt-stat .lbl { font-size:0.7rem; color:var(--muted); text-transform:uppercase; }
+  #chartWrap { max-height:300px; }
+</style>
+</head>
+<body>
+
+<h1>MLB Prop Model</h1>
+<div class="meta" id="metaLine">Loading...</div>
+
+<div class="tabs">
+  <div class="tab active" onclick="switchTab('picks')">Daily Picks</div>
+  <div class="tab" onclick="switchTab('backtest')">Strategy Backtester</div>
+</div>
+
+<!-- ============ DAILY PICKS ============ -->
+<div id="picks" class="panel active">
+  <button id="refreshBtn" onclick="loadPicks()">Refresh Picks</button>
+  <div style="margin-top:12px" id="picksLoading"></div>
+
+  <div class="card" id="kCard" style="margin-top:12px">
+    <h2>Pitcher K Props</h2>
+    <table><thead><tr>
+      <th>Pitcher</th><th>Team</th><th>Proj Ks</th><th>K/9</th>
+      <th>Book</th><th>Model</th><th>Impl</th><th>Edge</th><th>Matchup</th>
+    </tr></thead><tbody id="kBody"></tbody></table>
+  </div>
+
+  <div class="card" id="batCard">
+    <h2>Batter Props (Hits / TB / HR)</h2>
+    <table><thead><tr>
+      <th>Batter</th><th>Team</th><th>H/G</th><th>TB/G</th><th>HR%</th>
+      <th>Best Edge</th><th>Book</th><th>vs</th>
+    </tr></thead><tbody id="batBody"></tbody></table>
+  </div>
+
+  <div class="card">
+    <h2>Floor List (Top 10)</h2>
+    <div class="floor-grid" id="floorGrid"></div>
+  </div>
+</div>
+
+<!-- ============ BACKTESTER ============ -->
+<div id="backtest" class="panel">
+  <div class="card">
+    <h2>Strategy Backtester</h2>
+    <div class="bt-row">
+      <div class="bt-field">
+        <label>Year</label>
+        <select id="btYear">
+          <option value="2022">2022</option>
+          <option value="2023">2023</option>
+          <option value="2024" selected>2024</option>
+          <option value="2025">2025</option>
+        </select>
+      </div>
+      <div class="bt-field">
+        <label>Prop Type</label>
+        <select id="btProp">
+          <option value="pitcher_strikeouts">Pitcher Ks</option>
+          <option value="batter_hits">Batter Hits</option>
+          <option value="batter_total_bases">Batter TB</option>
+        </select>
+      </div>
+      <div class="bt-field">
+        <label>Line</label>
+        <input type="number" id="btLine" value="5.5" step="0.5" style="width:70px">
+      </div>
+      <div class="bt-field">
+        <label>Min Edge %</label>
+        <input type="number" id="btEdge" value="3" step="1" style="width:70px">
+      </div>
+      <button id="btRun" onclick="runBacktest()">Run Backtest</button>
+    </div>
+
+    <div id="btLoading"></div>
+
+    <div class="bt-stats" id="btStats" style="display:none">
+      <div class="bt-stat"><div class="val" id="stBets">-</div><div class="lbl">Bets</div></div>
+      <div class="bt-stat"><div class="val" id="stWinRate">-</div><div class="lbl">Win Rate</div></div>
+      <div class="bt-stat"><div class="val" id="stPnl">-</div><div class="lbl">P&L</div></div>
+      <div class="bt-stat"><div class="val" id="stRoi">-</div><div class="lbl">ROI</div></div>
+      <div class="bt-stat"><div class="val" id="stBest">-</div><div class="lbl">Best Month</div></div>
+      <div class="bt-stat"><div class="val" id="stWorst">-</div><div class="lbl">Worst Month</div></div>
+    </div>
+
+    <div id="chartWrap" style="display:none">
+      <canvas id="pnlChart"></canvas>
+    </div>
+  </div>
+</div>
+
+<script>
+/* ---- Tab switching ---- */
+function switchTab(id) {
+  document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+  event.target.classList.add('active');
+}
+
+/* ---- Edge color ---- */
+function edgeCls(e) {
+  if (e === null || e === undefined) return 'edge-none';
+  if (e > 0.05) return 'edge-green';
+  if (e > 0.02) return 'edge-yellow';
+  return 'edge-gray';
+}
+function edgeFmt(e) {
+  if (e === null || e === undefined || e === 0) return '—';
+  return (e > 0 ? '+' : '') + (e * 100).toFixed(1) + '%';
+}
+function pctFmt(v) { return v ? (v * 100).toFixed(0) + '%' : '—'; }
+function oddsFmt(p) { return p > 0 ? '+' + p : '' + p; }
+
+/* ---- Load picks ---- */
+async function loadPicks() {
+  const btn = document.getElementById('refreshBtn');
+  const loading = document.getElementById('picksLoading');
+  btn.disabled = true;
+  loading.innerHTML = '<span class="spinner"></span> Loading picks & odds...';
+
+  try {
+    const resp = await fetch('/api/picks');
+    const d = await resp.json();
+    if (d.error) { loading.textContent = 'Error: ' + d.error; return; }
+
+    document.getElementById('metaLine').textContent =
+      d.meta.date + ' | ' + d.meta.games + ' games (' + d.meta.confirmed +
+      ' confirmed) | ' + d.meta.odds_lines + ' odds lines';
+
+    // K picks table
+    const kb = document.getElementById('kBody');
+    kb.innerHTML = '';
+    d.k_picks.forEach(p => {
+      const bookStr = p.book ? p.book + ' O' + p.book_line + ' (' + oddsFmt(p.book_price) + ')' : '—';
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td><b>' + p.name + '</b></td><td>' + p.team + '</td>' +
+        '<td><b>' + p.proj_k + '</b></td><td>' + p.k9 + '</td>' +
+        '<td>' + bookStr + '</td>' +
+        '<td>' + pctFmt(p.model_prob) + '</td><td>' + pctFmt(p.book_impl) + '</td>' +
+        '<td class="' + edgeCls(p.edge) + '">' + edgeFmt(p.edge) + '</td>' +
+        '<td style="color:var(--muted);font-size:0.8rem">' + p.note + '</td>';
+      kb.appendChild(tr);
+    });
+
+    // Batter picks table
+    const bb = document.getElementById('batBody');
+    bb.innerHTML = '';
+    d.batter_picks.slice(0, 30).forEach(b => {
+      // Find best edge across markets
+      let bestEdge = 0, bestMkt = '—', bestBook = '—';
+      for (const m of ['hits', 'total_bases', 'home_runs']) {
+        const e = b[m + '_edge'] || 0;
+        if (e > bestEdge) {
+          bestEdge = e;
+          bestMkt = m.replace('_', ' ').toUpperCase();
+          bestBook = (b[m + '_book'] || '') + ' O' + (b[m + '_line'] || '') +
+                     ' (' + oddsFmt(b[m + '_price'] || 0) + ')';
+        }
+      }
+      const tr = document.createElement('tr');
+      tr.innerHTML = '<td><b>' + b.name + '</b></td><td>' + b.team + '</td>' +
+        '<td>' + b.h_proj + '</td><td>' + b.tb_proj + '</td>' +
+        '<td>' + (b.hr_prob * 100).toFixed(1) + '%</td>' +
+        '<td class="' + edgeCls(bestEdge) + '">' + edgeFmt(bestEdge) +
+        ' <span style="font-size:0.75rem;color:var(--muted)">' + bestMkt + '</span></td>' +
+        '<td style="font-size:0.8rem">' + (bestEdge > 0 ? bestBook : '—') + '</td>' +
+        '<td style="color:var(--muted);font-size:0.8rem">vs ' + b.opp_pitcher + '</td>';
+      bb.appendChild(tr);
+    });
+
+    // Floor list
+    const fg = document.getElementById('floorGrid');
+    fg.innerHTML = '';
+    d.floor_list.forEach((f, i) => {
+      const div = document.createElement('div');
+      div.className = 'floor-card';
+      div.innerHTML = '<div class="floor-rank">#' + (i + 1) + '</div>' +
+        '<div class="floor-name">' + f.name + '</div>' +
+        '<div class="floor-team">' + f.team + '</div>';
+      fg.appendChild(div);
+    });
+
+    loading.textContent = '';
+  } catch (e) {
+    loading.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---- Backtester ---- */
+let pnlChart = null;
+
+async function runBacktest() {
+  const btn = document.getElementById('btRun');
+  const loading = document.getElementById('btLoading');
+  btn.disabled = true;
+  loading.innerHTML = '<span class="spinner"></span> Running backtest (may take 1-5 min)...';
+  document.getElementById('btStats').style.display = 'none';
+  document.getElementById('chartWrap').style.display = 'none';
+
+  const params = {
+    year: document.getElementById('btYear').value,
+    prop_type: document.getElementById('btProp').value,
+    line: document.getElementById('btLine').value,
+    min_edge: document.getElementById('btEdge').value / 100,
+  };
+
+  try {
+    const resp = await fetch('/api/backtest', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(params),
+    });
+    const d = await resp.json();
+    if (d.error) { loading.textContent = 'Error: ' + d.error; return; }
+
+    document.getElementById('stBets').textContent = d.total_bets;
+    document.getElementById('stWinRate').textContent = d.win_rate + '%';
+    document.getElementById('stPnl').textContent = '$' + d.pnl.toFixed(2);
+    document.getElementById('stPnl').style.color = d.pnl >= 0 ? 'var(--green)' : 'var(--red)';
+    document.getElementById('stRoi').textContent = d.roi + '%';
+    document.getElementById('stRoi').style.color = d.roi >= 0 ? 'var(--green)' : 'var(--red)';
+    document.getElementById('stBest').textContent = d.best_month;
+    document.getElementById('stWorst').textContent = d.worst_month;
+    document.getElementById('btStats').style.display = 'grid';
+
+    // P&L Chart
+    if (pnlChart) pnlChart.destroy();
+    document.getElementById('chartWrap').style.display = 'block';
+    const ctx = document.getElementById('pnlChart').getContext('2d');
+    pnlChart = new Chart(ctx, {
+      type: 'line',
+      data: {
+        labels: d.chart_labels,
+        datasets: [{
+          label: 'Cumulative P&L ($)',
+          data: d.chart_data,
+          borderColor: d.chart_data[d.chart_data.length-1] >= 0 ? '#3fb950' : '#f85149',
+          backgroundColor: 'transparent',
+          tension: 0.3,
+          pointRadius: 0,
+          borderWidth: 2,
+        }]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { ticks: { color: '#8b949e', maxTicksLimit: 12, font: { size: 10 } },
+               grid: { color: '#30363d' } },
+          y: { ticks: { color: '#8b949e', callback: v => '$' + v },
+               grid: { color: '#30363d' } },
+        }
+      }
+    });
+
+    loading.textContent = '';
+  } catch (e) {
+    loading.textContent = 'Error: ' + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* ---- Auto-load on page load ---- */
+window.addEventListener('DOMContentLoaded', loadPicks);
+
+/* ---- Update line defaults when prop type changes ---- */
+document.getElementById('btProp').addEventListener('change', function() {
+  const defaults = { pitcher_strikeouts: 5.5, batter_hits: 1.5, batter_total_bases: 2.5 };
+  document.getElementById('btLine').value = defaults[this.value] || 5.5;
+});
+</script>
+</body>
+</html>
