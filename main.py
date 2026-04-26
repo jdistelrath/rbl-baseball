@@ -411,6 +411,13 @@ def mode_backtest_totals():
     run_totals_backtest(years=[2021, 2022, 2023, 2024, 2025])
 
 
+def mode_backtest_props():
+    """Backtest prop projections against actual game outcomes."""
+    print("[main] === Prop Projection Backtest ===")
+    from backtest_props import run_props_backtest
+    run_props_backtest(years=[2024, 2025])
+
+
 def mode_prop_ev():
     """Run HR and K prop EV engines against DK lines, print results to stdout."""
     print("[main] === Prop EV ===")
@@ -480,6 +487,7 @@ MODES = {
     "backtest": mode_backtest,
     "backtest_gamelevel": mode_backtest_gamelevel,
     "backtest_totals": mode_backtest_totals,
+    "backtest_props": mode_backtest_props,
     "prop_ev": mode_prop_ev,
     "prop_sweep": mode_prop_sweep,
     "dry_run": mode_dry_run,
