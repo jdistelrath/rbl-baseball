@@ -66,6 +66,7 @@
 
 <div class="tabs">
   <div class="tab active" onclick="switchTab('picks')">Daily Picks</div>
+  <div class="tab" onclick="switchTab('parlay')">Parlay Builder</div>
   <div class="tab" onclick="switchTab('backtest')">Strategy Backtester</div>
 </div>
 
@@ -100,6 +101,36 @@
   <div class="card">
     <h2>HR List (Top 10 Most Likely to Homer)</h2>
     <div class="floor-grid" id="floorGrid"></div>
+  </div>
+</div>
+
+<!-- ============ PARLAY BUILDER ============ -->
+<div id="parlay" class="panel">
+  <div class="card" id="recCard" style="border-color:var(--green);display:none">
+    <h2 style="color:var(--green)">Recommended Parlays</h2>
+    <div id="recParlays"></div>
+  </div>
+
+  <div class="card" style="margin-top:12px">
+    <h2>Build Your Parlay</h2>
+    <div id="parlayLoading"><span class="spinner"></span> Loading legs...</div>
+    <table><thead><tr>
+      <th style="width:30px"></th><th>Player</th><th>Prop</th><th>Book</th>
+      <th>Model</th><th>Edge</th><th>Note</th>
+    </tr></thead><tbody id="legBody"></tbody></table>
+  </div>
+
+  <div class="card" style="margin-top:12px;position:sticky;bottom:0;z-index:10">
+    <h2>Parlay Summary</h2>
+    <div id="parlaySummary" style="display:flex;gap:24px;flex-wrap:wrap;align-items:center">
+      <div><span style="color:var(--muted)">Legs:</span> <b id="pLegs">0</b></div>
+      <div><span style="color:var(--muted)">Combined Prob:</span> <b id="pProb">—</b></div>
+      <div><span style="color:var(--muted)">Parlay Odds:</span> <b id="pOdds">—</b></div>
+      <div><span style="color:var(--muted)">EV per $1:</span> <b id="pEv">—</b></div>
+      <div><span style="color:var(--muted)">Kelly Bet:</span> <b id="pKelly">—</b></div>
+      <div id="pWarn" style="color:var(--yellow);font-size:0.8rem;display:none"></div>
+      <button onclick="copyParlay()" style="margin-left:auto">Copy Parlay</button>
+    </div>
   </div>
 </div>
 
@@ -571,8 +602,144 @@ async function runHrBacktest() {
   }
 }
 
+/* ---- Parlay Builder ---- */
+let parlayLegs = [];    // all available legs
+let selectedIds = new Set();
+
+async function loadParlay() {
+  const loading = document.getElementById('parlayLoading');
+  loading.innerHTML = '<span class="spinner"></span> Loading legs...';
+  try {
+    const resp = await fetch('/api/parlay_builder');
+    const d = await resp.json();
+    if (d.error) { loading.textContent = 'Error: ' + d.error; return; }
+    parlayLegs = d.legs;
+
+    // Pre-select green+yellow (edge >5%)
+    selectedIds = new Set(d.legs.filter(l => l.edge > 0.05).map(l => l.id));
+
+    renderLegs();
+    renderRecommended(d.recommended);
+    updateParlayMath();
+    loading.style.display = 'none';
+  } catch (e) {
+    loading.textContent = 'Error: ' + e.message;
+  }
+}
+
+function renderLegs() {
+  const body = document.getElementById('legBody');
+  body.innerHTML = '';
+  parlayLegs.forEach(l => {
+    const checked = selectedIds.has(l.id) ? 'checked' : '';
+    const hrTag = l.is_hr ? ' <span style="color:var(--red);font-size:0.7rem">HIGH RISK</span>' : '';
+    const tr = document.createElement('tr');
+    if (l.edge < 0.02) tr.style.opacity = '0.4';
+    tr.innerHTML =
+      '<td><input type="checkbox" ' + checked + ' onchange="toggleLeg(\'' + l.id + '\')"></td>' +
+      '<td><b>' + l.player + '</b></td>' +
+      '<td>' + l.type + ' O' + l.line + hrTag + '</td>' +
+      '<td>' + l.book + ' (' + oddsFmt(l.price) + ')</td>' +
+      '<td>' + pctFmt(l.model_prob) + '</td>' +
+      '<td class="' + edgeCls(l.edge) + '">' + edgeFmt(l.edge) + '</td>' +
+      '<td style="color:var(--muted);font-size:0.8rem">' + l.note + '</td>';
+    body.appendChild(tr);
+  });
+}
+
+function toggleLeg(id) {
+  if (selectedIds.has(id)) selectedIds.delete(id);
+  else selectedIds.add(id);
+  updateParlayMath();
+}
+
+function updateParlayMath() {
+  const sel = parlayLegs.filter(l => selectedIds.has(l.id));
+  const n = sel.length;
+  document.getElementById('pLegs').textContent = n;
+
+  if (n === 0) {
+    document.getElementById('pProb').textContent = '—';
+    document.getElementById('pOdds').textContent = '—';
+    document.getElementById('pEv').textContent = '—';
+    document.getElementById('pKelly').textContent = '—';
+    document.getElementById('pWarn').style.display = 'none';
+    return;
+  }
+
+  let combProb = 1, combDec = 1;
+  sel.forEach(l => {
+    combProb *= l.model_prob;
+    const dec = l.price > 0 ? (l.price/100+1) : (100/Math.abs(l.price)+1);
+    combDec *= dec;
+  });
+
+  const ev = combProb * combDec - 1;
+  const american = combDec >= 2 ? '+' + Math.round((combDec-1)*100) : Math.round(-100/(combDec-1));
+
+  document.getElementById('pProb').textContent = (combProb * 100).toFixed(2) + '%';
+  document.getElementById('pOdds').textContent = american;
+
+  const evEl = document.getElementById('pEv');
+  evEl.textContent = (ev >= 0 ? '+' : '') + '$' + ev.toFixed(2);
+  evEl.style.color = ev >= 0 ? 'var(--green)' : 'var(--red)';
+
+  // Kelly for parlay
+  const b = combDec - 1;
+  const q = 1 - combProb;
+  let kf = b > 0 ? (combProb * b - q) / b : 0;
+  kf = Math.max(0, Math.min(kf, 0.05));
+  const bankroll = 100;
+  document.getElementById('pKelly').textContent = kf > 0 ? '$' + (kf * bankroll).toFixed(2) + ' (' + (kf*100).toFixed(1) + '%)' : '—';
+
+  // Correlation warnings
+  const players = sel.map(l => l.player);
+  const teams = sel.map(l => l.team);
+  const dupPlayers = players.filter((p, i) => players.indexOf(p) !== i);
+  const dupTeams = teams.filter((t, i) => teams.indexOf(t) !== i);
+  const warn = document.getElementById('pWarn');
+  const warnings = [];
+  if (dupPlayers.length) warnings.push('Same player in multiple legs: ' + [...new Set(dupPlayers)].join(', '));
+  if (dupTeams.length) warnings.push('Same team stacking: ' + [...new Set(dupTeams)].join(', '));
+  if (warnings.length) { warn.textContent = warnings.join(' | '); warn.style.display = 'block'; }
+  else { warn.style.display = 'none'; }
+}
+
+function renderRecommended(recs) {
+  const card = document.getElementById('recCard');
+  const div = document.getElementById('recParlays');
+  div.innerHTML = '';
+  if (!recs || !recs.length) { card.style.display = 'none'; return; }
+  card.style.display = 'block';
+
+  recs.forEach((r, i) => {
+    const evColor = r.ev_per_dollar >= 0 ? 'var(--green)' : 'var(--red)';
+    let html = '<div style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;margin-bottom:8px">' +
+      '<div style="display:flex;justify-content:space-between;align-items:center">' +
+      '<b>' + (i+1) + '. ' + r.size + '-Leg Parlay</b>' +
+      '<span style="color:' + evColor + ';font-weight:600">EV: ' + (r.ev_per_dollar >= 0 ? '+' : '') + '$' + r.ev_per_dollar.toFixed(2) + '/bet</span></div>' +
+      '<div style="font-size:0.8rem;color:var(--muted);margin-top:4px">' +
+      'Prob: ' + (r.combined_prob*100).toFixed(2) + '% | Odds: ' + (r.combined_american >= 0 ? '+' : '') + Math.round(r.combined_american) + '</div>' +
+      '<div style="font-size:0.85rem;margin-top:4px">';
+    r.legs.forEach(l => {
+      html += '<span style="margin-right:12px">' + l.player + ' ' + l.type + ' O' + l.line +
+        ' <span class="' + edgeCls(l.edge) + '">(' + edgeFmt(l.edge) + ')</span></span>';
+    });
+    html += '</div></div>';
+    div.innerHTML += html;
+  });
+}
+
+function copyParlay() {
+  const sel = parlayLegs.filter(l => selectedIds.has(l.id));
+  if (!sel.length) { alert('No legs selected'); return; }
+  const lines = sel.map(l => l.player + ' — ' + l.type + ' OVER ' + l.line + ' (' + oddsFmt(l.price) + ')');
+  const text = 'Parlay (' + sel.length + ' legs):\n' + lines.join('\n');
+  navigator.clipboard.writeText(text).then(() => alert('Copied to clipboard!'));
+}
+
 /* ---- Auto-load on page load ---- */
-window.addEventListener('DOMContentLoaded', loadPicks);
+window.addEventListener('DOMContentLoaded', () => { loadPicks(); loadParlay(); });
 
 /* ---- Update line options when prop type changes ---- */
 const lineOptions = {

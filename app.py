@@ -56,6 +56,103 @@ def api_picks():
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/parlay_builder")
+def api_parlay_builder():
+    """Return today's eligible legs with model probs and book odds for the parlay builder."""
+    try:
+        data = _run_picks_pipeline()
+
+        legs = []
+        # K legs
+        for p in data["k_picks"]:
+            if not p.get("book"):
+                continue
+            legs.append({
+                "id": f"k_{p['name']}",
+                "player": p["name"], "team": p["team"],
+                "type": "Ks", "line": p["book_line"], "side": "Over",
+                "book": p["book"], "price": p["book_price"],
+                "model_prob": p["model_prob"], "impl_prob": p["book_impl"],
+                "edge": p["edge"],
+                "kelly_frac": p.get("kelly_frac", 0),
+                "kelly_bet": p.get("kelly_bet", 0),
+                "note": p["note"],
+            })
+
+        # Batter legs (each market is a separate leg)
+        for b in data["batter_picks"]:
+            for mkt, label in [("hits", "Hits"), ("total_bases", "TB"), ("home_runs", "HR")]:
+                if not b.get(f"{mkt}_book"):
+                    continue
+                edge = b.get(f"{mkt}_edge", 0) or 0
+                legs.append({
+                    "id": f"{mkt}_{b['name']}",
+                    "player": b["name"], "team": b["team"],
+                    "type": label, "line": b[f"{mkt}_line"], "side": "Over",
+                    "book": b[f"{mkt}_book"], "price": b[f"{mkt}_price"],
+                    "model_prob": b.get(f"{mkt}_model", 0),
+                    "impl_prob": b.get(f"{mkt}_impl", 0),
+                    "edge": edge,
+                    "kelly_frac": b.get(f"{mkt}_kelly_frac", 0),
+                    "kelly_bet": b.get(f"{mkt}_kelly_bet", 0),
+                    "note": f"vs {b['opp_pitcher']}",
+                    "is_hr": mkt == "home_runs",
+                })
+
+        # Sort by edge descending
+        legs.sort(key=lambda x: x["edge"], reverse=True)
+
+        # Build recommended parlays: top 3-5 leg combos from green legs, no same player
+        green = [l for l in legs if l["edge"] > 0.05]
+        recommended = _build_recommended_parlays(green)
+
+        return jsonify({"legs": legs, "recommended": recommended})
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+def _build_recommended_parlays(green_legs):
+    """Build top 5 parlay combos from green legs, no duplicate players or same team."""
+    from itertools import combinations
+    if len(green_legs) < 3:
+        return []
+
+    results = []
+    for size in (3, 4):
+        if len(green_legs) < size:
+            continue
+        for combo in combinations(green_legs, size):
+            players = set(l["player"] for l in combo)
+            if len(players) < size:
+                continue  # same player in multiple legs
+            teams = [l["team"] for l in combo]
+            if len(set(teams)) < len(teams):
+                continue  # same team stacking
+
+            combined_prob = 1.0
+            combined_dec = 1.0
+            for l in combo:
+                combined_prob *= l["model_prob"]
+                p = l["price"]
+                dec = (p / 100.0 + 1.0) if p > 0 else (100.0 / abs(p) + 1.0)
+                combined_dec *= dec
+
+            ev = combined_prob * combined_dec - 1.0
+            results.append({
+                "legs": [{"player": l["player"], "type": l["type"], "line": l["line"],
+                          "price": l["price"], "edge": l["edge"]} for l in combo],
+                "size": size,
+                "combined_prob": round(combined_prob, 4),
+                "combined_dec_odds": round(combined_dec, 2),
+                "combined_american": round((combined_dec - 1) * 100, 0) if combined_dec >= 2 else round(-100 / (combined_dec - 1), 0),
+                "ev_per_dollar": round(ev, 4),
+            })
+
+    results.sort(key=lambda x: x["ev_per_dollar"], reverse=True)
+    return results[:5]
+
+
 @app.route("/api/backtest_hr", methods=["POST"])
 def api_backtest_hr():
     """Run HR list daily backtest and return JSON results."""
