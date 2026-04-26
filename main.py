@@ -25,6 +25,7 @@ import market_f5
 import market_strikeouts
 import market_hr_ev
 import market_k_ev
+import market_sweep
 
 
 # ---------------------------------------------------------------------------
@@ -425,6 +426,43 @@ def mode_prop_ev():
     _run_prop_ev_pipeline(games, parcels, dry_run=True)
 
 
+def mode_prop_sweep():
+    """Sweep all MLB prop markets, rank by EV, print top 10."""
+    print("[main] === Prop Sweep ===")
+    games = data_fetcher.get_today_schedule()
+    if not games:
+        print("[main] No games today.")
+        return
+
+    batter_df = data_fetcher.get_batter_statcast()
+    pitcher_df = data_fetcher.get_pitcher_statcast()
+
+    plays = market_sweep.sweep_all_props(games, pitcher_df, batter_df)
+
+    if not plays:
+        print("[main] No +EV plays found across any market.")
+        return
+
+    print(f"\n{'='*70}")
+    print(f"  TOP {min(10, len(plays))} +EV PLAYS ({len(plays)} total edges found)")
+    print(f"{'='*70}")
+    print(f"{'#':<3} {'Market':<6} {'Player':<25} {'Side':<6} {'Line':<5} "
+          f"{'Proj':<5} {'Edge':<6} {'EV':<7} {'Odds':<7} {'Bet':<5}")
+    print("-" * 70)
+
+    for i, p in enumerate(plays[:10], 1):
+        print(f"{i:<3} {p['market']:<6} {p['player_name']:<25} "
+              f"{p['best_side'].upper():<6} {p['line']:<5.1f} "
+              f"{p['model_projection']:<5.1f} {p['edge']:<6.1%} "
+              f"{p['ev_per_dollar']:<7.1%} {p['best_odds']:>+6d} "
+              f"${p['suggested_bet']:<4.0f}")
+
+    print("-" * 70)
+    print(f"  Markets swept: {', '.join(set(p['market'] for p in plays))}")
+    print(f"  Books: {', '.join(sorted(set(p['bookmaker'] for p in plays)))}")
+    print()
+
+
 def mode_dry_run():
     """Full pipeline, no Telegram send, print to console."""
     print("[main] === Dry Run ===")
@@ -443,6 +481,7 @@ MODES = {
     "backtest_gamelevel": mode_backtest_gamelevel,
     "backtest_totals": mode_backtest_totals,
     "prop_ev": mode_prop_ev,
+    "prop_sweep": mode_prop_sweep,
     "dry_run": mode_dry_run,
 }
 

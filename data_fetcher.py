@@ -268,6 +268,14 @@ def get_batter_statcast(season=None):
         ops = float(stat.get("ops", 0))
         obp = float(stat.get("obp", 0))
 
+        hits = int(stat.get("hits", 0))
+        runs = int(stat.get("runs", 0))
+        rbi = int(stat.get("rbi", 0))
+        doubles = int(stat.get("doubles", 0))
+        triples = int(stat.get("triples", 0))
+        total_bases = int(stat.get("totalBases", 0))
+        g = int(stat.get("gamesPlayed", 0))
+
         iso = slg - avg
         hr_fb = hr / (ab * 0.35) if ab > 0 else 0.0
         k_rate = so / pa if pa > 0 else 0.0
@@ -277,10 +285,16 @@ def get_batter_statcast(season=None):
             "mlbID": player.get("id", 0),
             "Tm": team.get("abbreviation", ""),
             "Team": team.get("name", ""),
-            "G": int(stat.get("gamesPlayed", 0)),
+            "G": g,
             "PA": pa,
             "AB": ab,
+            "H": hits,
+            "2B": doubles,
+            "3B": triples,
             "HR": hr,
+            "R": runs,
+            "RBI": rbi,
+            "TB": total_bases,
             "SO": so,
             "BA": avg,
             "OBP": obp,
