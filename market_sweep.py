@@ -224,7 +224,7 @@ def _build_pitcher_k_rates(pitcher_df, games):
         rates[name] = {
             "k9": k9,
             "ip_per_start": ip_per_start,
-            "projected_k": (k9 / 9.0) * ip_per_start,
+            "projected_k": (k9 / 9.0) * ip_per_start - 0.37,
         }
     return rates
 

@@ -144,7 +144,8 @@ def score_strikeout_prop(game, side, pitcher_df, batter_df, weather, odds_lookup
     temp = weather.get("temp_f", 70)
     temp_adj = -0.3 if temp < 45 else 0.0
 
-    model_ks = base_ks * k_adj + temp_adj
+    K_BIAS = -0.37
+    model_ks = base_ks * k_adj + temp_adj + K_BIAS
 
     # Get strikeout prop odds
     book_line, over_odds, under_odds = _extract_k_odds(pitcher_name, game, odds_lookup)

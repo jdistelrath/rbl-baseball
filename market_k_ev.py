@@ -67,7 +67,8 @@ def score_k_props(games, pitcher_df, batter_df, weather_map, k_prop_lines):
             weather = weather_map.get(stadium, {"temp_f": 70})
             temp_adj = -0.3 if weather.get("temp_f", 70) < 45 else 0.0
 
-            model_k = max(0.0, round((k9 / 9.0) * ip_per_start * k_rate_adj + temp_adj, 1))
+            K_BIAS = -0.37
+            model_k = max(0.0, round((k9 / 9.0) * ip_per_start * k_rate_adj + temp_adj + K_BIAS, 1))
 
             # Find prop line
             prop = _find_prop(pitcher_name, prop_lookup)
