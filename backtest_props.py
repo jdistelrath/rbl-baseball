@@ -313,6 +313,33 @@ def _project_hr_prob(batter_row, opp_team, team_pitcher_hr9, bat_side,
     return max(0.0, min(0.60, adjusted_prob))
 
 
+# Calibration: 4-season avg raw projection -> actual HR rate per quintile
+# Derived from 2022-2025 backtest (66K games)
+# (midpoint of raw projection bin, observed actual HR rate)
+_HR_CALIB_RAW =    [0.056, 0.098, 0.127, 0.162, 0.235]
+_HR_CALIB_ACTUAL = [0.082, 0.112, 0.136, 0.155, 0.182]
+
+
+def _calibrate_hr_prob(raw_prob):
+    """Piecewise linear interpolation from raw projection to calibrated probability."""
+    if raw_prob <= _HR_CALIB_RAW[0]:
+        # Extrapolate below lowest bin
+        slope = ((_HR_CALIB_ACTUAL[1] - _HR_CALIB_ACTUAL[0]) /
+                 (_HR_CALIB_RAW[1] - _HR_CALIB_RAW[0]))
+        return max(0.0, _HR_CALIB_ACTUAL[0] + slope * (raw_prob - _HR_CALIB_RAW[0]))
+    if raw_prob >= _HR_CALIB_RAW[-1]:
+        slope = ((_HR_CALIB_ACTUAL[-1] - _HR_CALIB_ACTUAL[-2]) /
+                 (_HR_CALIB_RAW[-1] - _HR_CALIB_RAW[-2]))
+        return min(0.50, _HR_CALIB_ACTUAL[-1] + slope * (raw_prob - _HR_CALIB_RAW[-1]))
+    # Find the two bracketing points
+    for i in range(len(_HR_CALIB_RAW) - 1):
+        if _HR_CALIB_RAW[i] <= raw_prob <= _HR_CALIB_RAW[i + 1]:
+            t = ((raw_prob - _HR_CALIB_RAW[i]) /
+                 (_HR_CALIB_RAW[i + 1] - _HR_CALIB_RAW[i]))
+            return _HR_CALIB_ACTUAL[i] + t * (_HR_CALIB_ACTUAL[i + 1] - _HR_CALIB_ACTUAL[i])
+    return raw_prob
+
+
 def _backtest_batter_hr(year, batter_df, pitcher_df):
     """Backtest HR prop projections vs 0.5 line."""
     cache_key = f"props_bt_batter_hr_{year}"
@@ -393,38 +420,37 @@ def _backtest_batter_hr(year, batter_df, pitcher_df):
         return
 
     df = pd.DataFrame(results)
-
-    # Directional accuracy vs 0.5 line (model prob > 50% => predict HR)
-    # But HR is rare (~10-15% of games), so use the raw probability
-    # as a score and check calibration
-
-    # Method: for each game, model says "over 0.5 HR" if projected_prob > threshold
-    # The right threshold is the base rate. But for DK props, the line is always 0.5
-    # and the question is: does a higher model prob correlate with more actual HRs?
+    df["calibrated_prob"] = df["projected_prob"].apply(_calibrate_hr_prob)
 
     actual_hr_rate = df["homered"].mean()
     print(f"  [HR] Base HR rate: {actual_hr_rate:.1%} ({df['homered'].sum()}/{len(df)})")
 
-    # Split into quintiles by projected prob and check HR rate in each
+    # Quintile analysis for both raw and calibrated
     df["prob_bin"] = pd.qcut(df["projected_prob"], q=5, duplicates="drop")
     bin_stats = df.groupby("prob_bin", observed=True).agg(
         games=("homered", "count"),
         hrs=("homered", "sum"),
-        avg_proj=("projected_prob", "mean"),
+        avg_raw=("projected_prob", "mean"),
+        avg_cal=("calibrated_prob", "mean"),
     )
     bin_stats["actual_rate"] = bin_stats["hrs"] / bin_stats["games"]
 
-    print("  [HR] Calibration by quintile:")
-    print(f"       {'Bin':<24} {'Games':>6} {'HRs':>5} {'Proj':>6} {'Actual':>7}")
-    for idx, row in bin_stats.iterrows():
-        print(f"       {str(idx):<24} {int(row['games']):>6} {int(row['hrs']):>5} "
-              f"{row['avg_proj']:>6.1%} {row['actual_rate']:>7.1%}")
+    print("  [HR] Quintile calibration (raw vs calibrated vs actual):")
+    print(f"       {'Q':<4} {'Games':>6} {'Raw':>7} {'Calib':>7} {'Actual':>7} {'RawErr':>7} {'CalErr':>7}")
+    for i, (idx, row) in enumerate(bin_stats.iterrows(), 1):
+        raw_err = row["avg_raw"] - row["actual_rate"]
+        cal_err = row["avg_cal"] - row["actual_rate"]
+        print(f"       Q{i:<3} {int(row['games']):>6} {row['avg_raw']:>7.1%} "
+              f"{row['avg_cal']:>7.1%} {row['actual_rate']:>7.1%} "
+              f"{raw_err:>+7.1%} {cal_err:>+7.1%}")
 
-    # Overall bias: mean projected prob vs actual HR rate
-    bias = df["projected_prob"].mean() - actual_hr_rate
-    mae = (df["projected_prob"] - df["homered"].astype(float)).abs().mean()
+    # Overall metrics: raw vs calibrated
+    raw_bias = df["projected_prob"].mean() - actual_hr_rate
+    cal_bias = df["calibrated_prob"].mean() - actual_hr_rate
+    raw_mae = (df["projected_prob"] - df["homered"].astype(float)).abs().mean()
+    cal_mae = (df["calibrated_prob"] - df["homered"].astype(float)).abs().mean()
 
-    # Directional: if we bet OVER on top 20% of projections, what's the hit rate?
+    # Top/bottom 20% (ranking is the same since calibration is monotonic)
     top_20_threshold = df["projected_prob"].quantile(0.80)
     top_picks = df[df["projected_prob"] >= top_20_threshold]
     top_hr_rate = top_picks["homered"].mean() if len(top_picks) > 0 else 0
@@ -437,9 +463,9 @@ def _backtest_batter_hr(year, batter_df, pitcher_df):
           f"({top_picks['homered'].sum()}/{len(top_picks)})")
     print(f"  [HR] Bottom 20%: {bottom_hr_rate:.1%} HR rate "
           f"({bottom_picks['homered'].sum()}/{len(bottom_picks)})")
-    print(f"  [HR] Lift: {top_hr_rate/max(bottom_hr_rate, 0.001):.1f}x "
-          f"(top vs bottom quintile)")
-    print(f"  [HR] MAE: {mae:.4f} | Bias: {bias:+.4f}")
+    print(f"  [HR] Lift: {top_hr_rate/max(bottom_hr_rate, 0.001):.1f}x")
+    print(f"  [HR] Raw   -> MAE: {raw_mae:.4f} | Bias: {raw_bias:+.4f}")
+    print(f"  [HR] Calib -> MAE: {cal_mae:.4f} | Bias: {cal_bias:+.4f}")
     print(f"  [HR] Games analyzed: {len(df)}")
 
 
