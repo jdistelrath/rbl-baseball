@@ -268,10 +268,14 @@ async function runBacktest() {
   };
 
   try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 600000); // 10 min timeout
     const resp = await fetch('/api/backtest', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
       body: JSON.stringify(params),
+      signal: controller.signal,
     });
+    clearTimeout(timeoutId);
     const d = await resp.json();
     if (d.error) { loading.textContent = 'Error: ' + d.error; return; }
 
@@ -317,7 +321,11 @@ async function runBacktest() {
 
     loading.textContent = '';
   } catch (e) {
-    loading.textContent = 'Error: ' + e.message;
+    if (e.name === 'AbortError') {
+      loading.textContent = 'Backtest timed out (>10 min). Try CLI: python main.py backtest_props';
+    } else {
+      loading.textContent = 'Error: ' + e.message;
+    }
   } finally {
     btn.disabled = false;
   }

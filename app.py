@@ -60,9 +60,13 @@ def api_backtest():
     """Run strategy backtester and return JSON results."""
     try:
         params = request.get_json(force=True)
+        print(f"[api/backtest] Running with params: {params}")
         data = _run_backtest(params)
+        print(f"[api/backtest] Complete: {data.get('total_bets', 0)} bets, "
+              f"PnL=${data.get('pnl', 0):.2f}")
         return jsonify(data)
     except Exception as e:
+        print(f"[api/backtest] EXCEPTION: {e}")
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500
 

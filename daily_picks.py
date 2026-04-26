@@ -275,6 +275,14 @@ def run_daily_picks():
 
     confirmed_games = 0
 
+    # Pre-fetch weather per stadium for wind context
+    from data_fetcher import get_weather
+    weather_map = {}
+    for game in games:
+        stadium = game.get("stadium", "")
+        if stadium and stadium not in weather_map:
+            weather_map[stadium] = get_weather(stadium, None)
+
     for game in games:
         game_id = game["game_id"]
         home = game["home_team"]
@@ -360,6 +368,22 @@ def run_daily_picks():
                     park_stadium = TEAM_STADIUM.get(opp_team, "")
                 pf = PARK_HR_FACTOR.get(park_stadium, 1.0)
 
+                # Wind context
+                wx = weather_map.get(stadium, {})
+                wind_speed = wx.get("wind_speed_mph", 0)
+                wind_deg = wx.get("wind_dir_degrees", 0)
+                wind_label = wx.get("wind_dir_label", "calm")
+                if wind_speed >= 10 and 150 <= wind_deg <= 270:
+                    wind_tag = f"WIND OUT {wind_speed:.0f}mph {wind_label}"
+                elif wind_speed >= 10 and (wind_deg <= 60 or wind_deg >= 330):
+                    wind_tag = f"wind in {wind_speed:.0f}mph {wind_label}"
+                else:
+                    wind_tag = ""
+
+                note_parts = [f"vs {opp_pitcher}", f"PF {pf:.2f}"]
+                if wind_tag:
+                    note_parts.append(wind_tag)
+
                 batter_picks.append({
                     "name": name,
                     "team": batter_team,
@@ -372,7 +396,11 @@ def run_daily_picks():
                     "hr_prob_raw": round(raw_hr, 3) if raw_hr else 0,
                     "park_factor": pf,
                     "bat_side": bat_side,
-                    "note": f"vs {opp_pitcher}, PF {pf:.2f}",
+                    "wind_speed": round(wind_speed, 0),
+                    "wind_out": wind_speed >= 10 and 150 <= wind_deg <= 270,
+                    "wind_in": wind_speed >= 10 and (wind_deg <= 60 or wind_deg >= 330),
+                    "wind_tag": wind_tag,
+                    "note": ", ".join(note_parts),
                 })
 
     print(f"[daily_picks] {len(games)} games, {confirmed_games} with lineups")
@@ -392,6 +420,9 @@ def run_daily_picks():
     # --- Attach line info to picks ---
     _attach_k_lines(k_picks, odds_lines)
     _attach_batter_lines(batter_picks, odds_lines)
+
+    # --- Telegram high-EV alerts ---
+    _send_high_ev_alerts(k_picks, batter_picks)
 
     # --- Generate sharp brief ---
     _write_sharp_brief(k_picks, batter_picks, today)
@@ -445,6 +476,38 @@ def _attach_batter_lines(batter_picks, odds_lines):
                 b["has_any_line"] = True
             else:
                 b[f"{short}_book"] = None
+
+
+def _send_high_ev_alerts(k_picks, batter_picks):
+    """Send Telegram alerts for any pick with edge > 10% and a confirmed book line."""
+    from messenger import _send_telegram
+
+    alerts = []
+
+    for p in k_picks:
+        if p.get("has_line") and p.get("edge", 0) > 0.10:
+            alerts.append(
+                f"\U0001f6a8 High EV Alert: {p['name']} Ks OVER {p['book_line']} "
+                f"-- Model: {p['model_prob']:.0%}, Book: {p['book_impl']:.0%}, "
+                f"Edge: {p['edge']:.0%}"
+            )
+
+    for b in batter_picks:
+        for mkt, label in [("hits", "Hits"), ("total_bases", "TB"), ("home_runs", "HR")]:
+            if b.get(f"{mkt}_book") and b.get(f"{mkt}_edge", 0) > 0.10:
+                alerts.append(
+                    f"\U0001f6a8 High EV Alert: {b['name']} {label} OVER {b[f'{mkt}_line']} "
+                    f"-- Model: {b[f'{mkt}_model']:.0%}, Book: {b[f'{mkt}_impl']:.0%}, "
+                    f"Edge: {b[f'{mkt}_edge']:.0%}"
+                )
+
+    if not alerts:
+        print("[daily_picks] No high-EV alerts (>10% edge) to send.")
+        return
+
+    text = "\n\n".join(alerts)
+    print(f"[daily_picks] Sending {len(alerts)} high-EV Telegram alerts...")
+    _send_telegram(text)
 
 
 def _format_k_line(p):
