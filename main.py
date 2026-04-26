@@ -470,6 +470,12 @@ def mode_prop_sweep():
     print()
 
 
+def mode_daily_picks():
+    """Generate daily sharp brief and floor list."""
+    from daily_picks import run_daily_picks
+    run_daily_picks()
+
+
 def mode_dry_run():
     """Full pipeline, no Telegram send, print to console."""
     print("[main] === Dry Run ===")
@@ -490,6 +496,7 @@ MODES = {
     "backtest_props": mode_backtest_props,
     "prop_ev": mode_prop_ev,
     "prop_sweep": mode_prop_sweep,
+    "daily_picks": mode_daily_picks,
     "dry_run": mode_dry_run,
 }
 
