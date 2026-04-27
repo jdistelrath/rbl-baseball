@@ -1,6 +1,10 @@
 """
 Closing Line Value (CLV) Tracker.
 Logs pick snapshots, pulls closing lines, records outcomes, calculates CLV.
+
+NOTE: clv_log.json is the most critical persistent data file. On Railway's
+ephemeral filesystem it will be lost on redeploy. Needs a persistent storage
+solution (Railway Volume, S3, or database) for production use.
 """
 
 import json

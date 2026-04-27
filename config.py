@@ -82,6 +82,18 @@ class _Config:
         self.weights = _weights
 
         # Paths
+        # NOTE: Railway has an ephemeral filesystem. All writes to cache/,
+        # state/, outputs/ will be lost on redeploy. For persistent storage,
+        # these need to be backed by a volume mount or external database
+        # (e.g. Railway Volume, S3, or a Postgres JSON column).
+        # Current writes that need persistence:
+        #   - cache/*.pkl           (API response caches, can be re-fetched)
+        #   - state/daily_state_*.json (lineup tracking, ephemeral by design)
+        #   - outputs/clv_log.json  (CLV tracking — NEEDS persistent storage)
+        #   - outputs/sharp_brief.txt, hr_list.txt (regenerated each run)
+        #   - outputs/backtest/     (backtest results — nice to keep but regenerable)
+        #   - weights.json          (calibrated model weights — commit to repo instead)
+        #   - weights_totals.json   (calibrated totals weights — commit to repo instead)
         self.base_dir = BASE_DIR
         self.cache_dir = BASE_DIR / "cache"
         self.state_dir = BASE_DIR / "state"
