@@ -82,6 +82,7 @@
   <div class="tab active" onclick="switchTab('picks')">Daily Picks</div>
   <div class="tab" onclick="switchTab('parlay')">Parlay Builder</div>
   <div class="tab" onclick="switchTab('clv')">CLV Tracker</div>
+  <div class="tab" onclick="switchTab('underdog')">Underdog Draft</div>
   <div class="tab" onclick="switchTab('backtest')">Strategy Backtester</div>
 </div>
 
@@ -204,6 +205,73 @@
       <th>Date</th><th>Player</th><th>Prop</th><th>Line</th><th>Open</th><th>Close</th>
       <th>CLV</th><th>Result</th><th>P&L</th>
     </tr></thead><tbody id="clvBody"></tbody></table>
+  </div>
+</div>
+
+<!-- ============ UNDERDOG DRAFT ============ -->
+<div id="underdog" class="panel">
+  <div style="display:flex;gap:8px;align-items:center;margin-bottom:12px;flex-wrap:wrap">
+    <button onclick="loadUnderdog()">Refresh Projections</button>
+    <span id="udStatus" style="color:var(--muted);font-size:0.8rem"></span>
+  </div>
+
+  <div class="card" id="udLineupCard" style="border-color:var(--green);display:none">
+    <h2 style="color:var(--green)">🏆 Optimal Lineup — <span id="udLineupTotal">—</span> proj. pts</h2>
+    <div id="udLineupBody" style="font-family:'SFMono-Regular',Consolas,monospace;font-size:0.9rem;line-height:1.8"></div>
+    <div id="udLineupTeams" style="margin-top:8px;font-size:0.8rem;color:var(--muted)"></div>
+  </div>
+
+  <div class="card" id="udRoundsCard" style="display:none">
+    <h2>Draft Board — Rounds 1–3</h2>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+      <div>
+        <h3 style="font-size:0.85rem;color:var(--blue);margin-bottom:6px">Round 1</h3>
+        <div id="udRound1"></div>
+      </div>
+      <div>
+        <h3 style="font-size:0.85rem;color:var(--blue);margin-bottom:6px">Round 2</h3>
+        <div id="udRound2"></div>
+      </div>
+      <div>
+        <h3 style="font-size:0.85rem;color:var(--blue);margin-bottom:6px">Round 3</h3>
+        <div id="udRound3"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="udByPosCard" style="display:none">
+    <h2>By Position — Top 5</h2>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px">
+      <div>
+        <h3 style="font-size:0.85rem;color:var(--blue);margin-bottom:6px">Pitchers</h3>
+        <div id="udPitchers"></div>
+      </div>
+      <div>
+        <h3 style="font-size:0.85rem;color:var(--blue);margin-bottom:6px">Infielders</h3>
+        <div id="udInfielders"></div>
+      </div>
+      <div>
+        <h3 style="font-size:0.85rem;color:var(--blue);margin-bottom:6px">Outfielders</h3>
+        <div id="udOutfielders"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="udAllCard" style="display:none">
+    <h2>Full Player Board</h2>
+    <table>
+      <thead><tr>
+        <th data-sort="name" onclick="sortUd('name')">Name</th>
+        <th data-sort="position" onclick="sortUd('position')">Pos</th>
+        <th data-sort="team" onclick="sortUd('team')">Team</th>
+        <th data-sort="opponent" onclick="sortUd('opponent')">Opp</th>
+        <th data-sort="lineup_spot" onclick="sortUd('lineup_spot')">Spot</th>
+        <th data-sort="projected_fp" onclick="sortUd('projected_fp')">Proj FP</th>
+        <th data-sort="tier" onclick="sortUd('tier')">Tier</th>
+        <th>Edge</th>
+      </tr></thead>
+      <tbody id="udAllBody"></tbody>
+    </table>
   </div>
 </div>
 
@@ -1022,8 +1090,149 @@ function renderClvTable() {
   if (!rows.length) body.innerHTML = '<tr><td colspan="9" style="color:var(--muted)">No picks logged yet. Click "Log Today\'s Picks" to start tracking.</td></tr>';
 }
 
+/* ---- Underdog Draft ---- */
+let _udAll = [];
+let _udSortKey = 'projected_fp';
+let _udSortDir = -1;
+
+function udTierColor(t) {
+  if (t === 'ELITE') return 'var(--green)';
+  if (t === 'SOLID') return 'var(--yellow)';
+  if (t === 'VALUE') return 'var(--blue)';
+  return 'var(--muted)';
+}
+
+function udPosBadge(pos) {
+  const colors = { 'P': '#a371f7', 'IF': '#58a6ff', 'OF': '#3fb950' };
+  const bg = colors[pos] || 'var(--muted)';
+  return '<span style="display:inline-block;padding:1px 6px;background:' + bg +
+    ';color:#0d1117;border-radius:3px;font-size:0.7rem;font-weight:700;min-width:24px;text-align:center">' + pos + '</span>';
+}
+
+function udPlayerLine(p, rank) {
+  const tierColor = udTierColor(p.tier);
+  const rankStr = rank !== undefined ? '<b style="color:var(--muted);width:24px;display:inline-block">#' + rank + '</b> ' : '';
+  return '<div style="display:flex;align-items:center;gap:8px;padding:4px 0;border-bottom:1px solid var(--border);font-size:0.85rem">' +
+    rankStr + udPosBadge(p.position) +
+    ' <b style="flex:1">' + p.name + '</b>' +
+    ' <span style="color:var(--muted);font-size:0.75rem">' + p.team + '</span>' +
+    ' <span style="color:' + tierColor + ';font-weight:600">' + p.projected_fp.toFixed(1) + '</span>' +
+    '</div>';
+}
+
+async function loadUnderdog() {
+  const s = document.getElementById('udStatus');
+  s.innerHTML = '<span class="spinner"></span> Loading projections...';
+  try {
+    const resp = await fetch('/api/underdog-draft');
+    const d = await resp.json();
+    if (d.status === 'error') {
+      s.textContent = 'Error: ' + d.error;
+      return;
+    }
+
+    const sheet = d.cheat_sheet || {};
+    let metaBits = [d.date, d.games + ' games', d.confirmed_lineups + ' confirmed', d.player_count + ' players'];
+    s.textContent = metaBits.join(' | ') + (d.note ? ' — ' + d.note : '');
+
+    // Optimal Lineup
+    const opt = sheet.optimal_lineup;
+    const lineupCard = document.getElementById('udLineupCard');
+    if (opt) {
+      lineupCard.style.display = 'block';
+      document.getElementById('udLineupTotal').textContent = opt.total_fp.toFixed(1);
+      const slots = [
+        ['P', opt.P], ['IF', opt.IF1], ['IF', opt.IF2],
+        ['OF', opt.OF1], ['OF', opt.OF2], ['FLEX', opt.FLEX],
+      ];
+      let html = '';
+      slots.forEach(([slot, p]) => {
+        const tierColor = udTierColor(p.tier);
+        html += '<div><b style="color:var(--blue);width:54px;display:inline-block">' + slot + ':</b> ' +
+          '<b>' + p.name + '</b> ' +
+          '<span style="color:var(--muted)">(' + p.team + ' vs ' + p.opponent + ')</span> — ' +
+          '<span style="color:' + tierColor + ';font-weight:600">' + p.projected_fp.toFixed(1) + ' pts</span> ' +
+          '<span style="color:var(--muted);font-size:0.75rem">· ' + p.key_edge + '</span></div>';
+      });
+      document.getElementById('udLineupBody').innerHTML = html;
+      document.getElementById('udLineupTeams').textContent =
+        'Teams: ' + opt.teams.join(', ') + ' (' + opt.teams.length + '-team rule ' +
+        (opt.teams.length >= 2 ? 'OK ✓' : 'FAIL ✗') + ')';
+    } else {
+      lineupCard.style.display = 'none';
+    }
+
+    // Rounds
+    const roundsCard = document.getElementById('udRoundsCard');
+    const r1 = sheet.round_1 || [], r2 = sheet.round_2 || [], r3 = sheet.round_3 || [];
+    if (r1.length) {
+      roundsCard.style.display = 'block';
+      document.getElementById('udRound1').innerHTML = r1.map((p, i) => udPlayerLine(p, i + 1)).join('');
+      document.getElementById('udRound2').innerHTML = r2.map((p, i) => udPlayerLine(p, i + 5)).join('');
+      document.getElementById('udRound3').innerHTML = r3.map((p, i) => udPlayerLine(p, i + 9)).join('');
+    } else {
+      roundsCard.style.display = 'none';
+    }
+
+    // By position
+    const byPosCard = document.getElementById('udByPosCard');
+    const pit = sheet.pitchers || [], ifT = sheet.if_targets || [], ofT = sheet.of_targets || [];
+    if (pit.length || ifT.length || ofT.length) {
+      byPosCard.style.display = 'block';
+      document.getElementById('udPitchers').innerHTML = pit.map((p, i) => udPlayerLine(p, i + 1)).join('') || '<div style="color:var(--muted)">—</div>';
+      document.getElementById('udInfielders').innerHTML = ifT.map((p, i) => udPlayerLine(p, i + 1)).join('') || '<div style="color:var(--muted)">—</div>';
+      document.getElementById('udOutfielders').innerHTML = ofT.map((p, i) => udPlayerLine(p, i + 1)).join('') || '<div style="color:var(--muted)">—</div>';
+    } else {
+      byPosCard.style.display = 'none';
+    }
+
+    // Full table
+    _udAll = d.all_players || [];
+    const allCard = document.getElementById('udAllCard');
+    if (_udAll.length) {
+      allCard.style.display = 'block';
+      _udSortKey = 'projected_fp';
+      _udSortDir = -1;
+      renderUdTable();
+    } else {
+      allCard.style.display = 'none';
+    }
+  } catch (e) {
+    s.textContent = 'Error: ' + e.message;
+  }
+}
+
+function sortUd(key) {
+  if (_udSortKey === key) { _udSortDir = -_udSortDir; }
+  else { _udSortKey = key; _udSortDir = (key === 'name' || key === 'team' || key === 'opponent' || key === 'position' || key === 'tier') ? 1 : -1; }
+  renderUdTable();
+}
+
+function renderUdTable() {
+  const body = document.getElementById('udAllBody');
+  const sorted = [..._udAll].sort((a, b) => {
+    const va = a[_udSortKey], vb = b[_udSortKey];
+    if (typeof va === 'string') return va.localeCompare(vb) * _udSortDir;
+    return ((va || 0) - (vb || 0)) * _udSortDir;
+  });
+  body.innerHTML = sorted.map(p => {
+    const tierColor = udTierColor(p.tier);
+    const spot = p.position === 'P' ? '—' : p.lineup_spot;
+    return '<tr>' +
+      '<td><b>' + p.name + '</b></td>' +
+      '<td>' + udPosBadge(p.position) + '</td>' +
+      '<td>' + p.team + '</td>' +
+      '<td style="color:var(--muted)">' + p.opponent + '</td>' +
+      '<td>' + spot + '</td>' +
+      '<td style="color:' + tierColor + ';font-weight:600">' + p.projected_fp.toFixed(1) + '</td>' +
+      '<td style="color:' + tierColor + ';font-size:0.75rem;font-weight:600">' + p.tier + '</td>' +
+      '<td style="color:var(--muted);font-size:0.78rem">' + (p.key_edge || '—') + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
 /* ---- Auto-load on page load ---- */
-window.addEventListener('DOMContentLoaded', () => { loadKellyConfig(); loadPicks(); loadParlay(); loadClv(); });
+window.addEventListener('DOMContentLoaded', () => { loadKellyConfig(); loadPicks(); loadParlay(); loadClv(); loadUnderdog(); });
 
 /* ---- Update line options when prop type changes ---- */
 const lineOptions = {

@@ -200,6 +200,57 @@ def _build_recommended_parlays(green_legs):
     return results[:5]
 
 
+@app.route("/api/underdog-draft")
+def api_underdog_draft():
+    """Project today's slate under Underdog scoring + return draft cheat sheet."""
+    try:
+        from market_underdog_draft import project_all_players, build_draft_cheat_sheet
+
+        schedule = get_today_schedule()
+        if not schedule:
+            return jsonify({
+                "status": "ok",
+                "date": date.today().isoformat(),
+                "player_count": 0,
+                "cheat_sheet": build_draft_cheat_sheet([]),
+                "all_players": [],
+                "note": "No games scheduled today.",
+            })
+
+        for game in schedule:
+            game["lineups"] = get_confirmed_lineups(game["game_id"])
+
+        batter_df = get_batter_statcast()
+        pitcher_df = get_pitcher_statcast()
+
+        players = project_all_players(schedule, batter_df, pitcher_df)
+        cheat_sheet = build_draft_cheat_sheet(players)
+
+        confirmed = sum(1 for g in schedule if g.get("lineups"))
+        note = ""
+        if confirmed == 0:
+            note = ("Lineups not yet posted. Pitchers shown; hitters appear once "
+                    "lineups are confirmed.")
+
+        return jsonify({
+            "status": "ok",
+            "date": date.today().isoformat(),
+            "games": len(schedule),
+            "confirmed_lineups": confirmed,
+            "player_count": len(players),
+            "cheat_sheet": cheat_sheet,
+            "all_players": sorted(players, key=lambda x: x["projected_fp"], reverse=True),
+            "note": note,
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "trace": traceback.format_exc(),
+        }), 500
+
+
 @app.route("/api/backtest_hr", methods=["POST"])
 def api_backtest_hr():
     """Run HR list daily backtest and return JSON results."""
