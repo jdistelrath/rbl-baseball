@@ -82,7 +82,8 @@ def _over_probability(model_ks, book_line):
     return prob
 
 
-def score_strikeout_prop(game, side, pitcher_df, batter_df, weather, odds_lookup):
+def score_strikeout_prop(game, side, pitcher_df, batter_df, weather, odds_lookup,
+                         k_prop_lines=None):
     """
     Score a strikeout prop for one pitcher in a game.
 
@@ -92,7 +93,8 @@ def score_strikeout_prop(game, side, pitcher_df, batter_df, weather, odds_lookup
         pitcher_df: pitching stats DataFrame
         batter_df: batting stats DataFrame
         weather: dict
-        odds_lookup: odds data
+        odds_lookup: odds data (sport-level, legacy)
+        k_prop_lines: list from get_player_props("pitcher_strikeouts") (event-level, preferred)
 
     Returns dict or None if pitcher K/9 <= 7.5 or insufficient edge.
     """
@@ -147,8 +149,12 @@ def score_strikeout_prop(game, side, pitcher_df, batter_df, weather, odds_lookup
     K_BIAS = -0.37
     model_ks = base_ks * k_adj + temp_adj + K_BIAS
 
-    # Get strikeout prop odds
-    book_line, over_odds, under_odds = _extract_k_odds(pitcher_name, game, odds_lookup)
+    # Get strikeout prop odds — prefer event-level player props if available
+    book_line, over_odds, under_odds = None, None, None
+    if k_prop_lines:
+        book_line, over_odds, under_odds = _find_k_prop_line(pitcher_name, k_prop_lines)
+    if book_line is None:
+        book_line, over_odds, under_odds = _extract_k_odds(pitcher_name, game, odds_lookup)
 
     if book_line is None:
         # No odds; still provide projection but no EV
@@ -277,3 +283,15 @@ def _build_factors(pitcher_name, k9, k_pct, opp_k_rate, opp_team, temp):
         factors.append(f"cold ({temp:.0f}F) suppresses Ks")
 
     return factors
+
+
+def _find_k_prop_line(pitcher_name, k_prop_lines):
+    """Find a K prop line from event-level player props data."""
+    if not k_prop_lines:
+        return None, None, None
+    last = pitcher_name.split()[-1].lower() if pitcher_name else ""
+    for prop in k_prop_lines:
+        pname = prop.get("player_name", "").lower()
+        if pitcher_name.lower() == pname or (last and last in pname):
+            return prop.get("over_line"), prop.get("over_odds"), prop.get("under_odds")
+    return None, None, None

@@ -134,6 +134,11 @@ def _run_ev_pipeline(games, dry_run=False):
     if not odds_data:
         print("[main] No odds data available. EV pipeline will run without book lines.")
 
+    # Fetch player prop lines (event-level)
+    k_prop_lines = data_fetcher.get_player_props("pitcher_strikeouts")
+    hr_prop_lines = data_fetcher.get_player_props("batter_home_runs")
+    print(f"[main] Prop lines from Odds API: {len(k_prop_lines)} K, {len(hr_prop_lines)} HR")
+
     # Load stats (cached, same as HR pipeline)
     batter_df = data_fetcher.get_batter_statcast()
     pitcher_df = data_fetcher.get_pitcher_statcast()
@@ -169,7 +174,8 @@ def _run_ev_pipeline(games, dry_run=False):
         for side in ("home", "away"):
             try:
                 k_result = market_strikeouts.score_strikeout_prop(
-                    game, side, pitcher_df, batter_df, weather, odds_data
+                    game, side, pitcher_df, batter_df, weather, odds_data,
+                    k_prop_lines=k_prop_lines
                 )
                 if k_result:
                     all_ev_plays.append(k_result)
