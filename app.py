@@ -22,6 +22,7 @@ from config import CFG
 from data_fetcher import (
     get_today_schedule, get_confirmed_lineups,
     get_batter_statcast, get_pitcher_statcast,
+    filter_active_games,
 )
 from daily_picks import (
     _project_ks, _project_batter, _find_pitcher_row, _find_batter_row,
@@ -206,15 +207,22 @@ def api_underdog_draft():
     try:
         from market_underdog_draft import project_all_players, build_draft_cheat_sheet
 
-        schedule = get_today_schedule()
+        raw_schedule = get_today_schedule()
+        schedule = filter_active_games(raw_schedule)
+        started_count = len(raw_schedule) - len(schedule)
         if not schedule:
+            note = (
+                "All scheduled games have already started — none available for drafts."
+                if raw_schedule else "No games scheduled today."
+            )
             return jsonify({
                 "status": "ok",
                 "date": date.today().isoformat(),
                 "player_count": 0,
                 "cheat_sheet": build_draft_cheat_sheet([]),
                 "all_players": [],
-                "note": "No games scheduled today.",
+                "started_count": started_count,
+                "note": note,
             })
 
         for game in schedule:
@@ -231,6 +239,9 @@ def api_underdog_draft():
         if confirmed == 0:
             note = ("Lineups not yet posted. Pitchers shown; hitters appear once "
                     "lineups are confirmed.")
+        if started_count > 0:
+            prefix = f"{started_count} game(s) already started — excluded from draft board."
+            note = f"{prefix} {note}".strip()
 
         return jsonify({
             "status": "ok",
@@ -240,6 +251,7 @@ def api_underdog_draft():
             "player_count": len(players),
             "cheat_sheet": cheat_sheet,
             "all_players": sorted(players, key=lambda x: x["projected_fp"], reverse=True),
+            "started_count": started_count,
             "note": note,
         })
     except Exception as e:
@@ -307,9 +319,22 @@ def api_backtest():
 # ---------------------------------------------------------------------------
 
 def _run_picks_pipeline():
-    games = get_today_schedule()
+    raw_games = get_today_schedule()
+    games = filter_active_games(raw_games)
+    started_count = len(raw_games) - len(games)
     if not games:
-        return {"k_picks": [], "batter_picks": [], "hr_list": [], "meta": {"games": 0}}
+        note = (
+            "All scheduled games have already started."
+            if raw_games else "No games scheduled today."
+        )
+        return {
+            "k_picks": [], "batter_picks": [], "hr_list": [],
+            "meta": {
+                "games": 0,
+                "started_count": started_count,
+                "lines_note": note,
+            },
+        }
 
     batter_df = get_batter_statcast()
     pitcher_df = get_pitcher_statcast()
@@ -473,6 +498,9 @@ def _run_picks_pipeline():
     lines_note = ""
     if not odds_lines:
         lines_note = "Lines available pre-game only. Check back tomorrow morning."
+    if started_count > 0:
+        prefix = f"{started_count} game(s) already started — excluded from picks."
+        lines_note = f"{prefix} {lines_note}".strip()
 
     return {
         "k_picks": sorted(k_picks, key=lambda x: x["proj_k"], reverse=True),
@@ -483,6 +511,7 @@ def _run_picks_pipeline():
             "games": len(games),
             "confirmed": confirmed,
             "odds_lines": len(odds_lines),
+            "started_count": started_count,
             "lines_note": lines_note,
         },
     }

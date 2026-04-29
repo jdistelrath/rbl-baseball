@@ -342,14 +342,15 @@ def run_daily_picks():
     from data_fetcher import (
         get_today_schedule, get_confirmed_lineups,
         get_batter_statcast, get_pitcher_statcast,
+        filter_active_games,
     )
 
     today = date.today().strftime("%B %d, %Y")
     print(f"[daily_picks] === Daily Picks for {today} ===")
 
-    games = get_today_schedule()
+    games = filter_active_games(get_today_schedule())
     if not games:
-        print("[daily_picks] No games today.")
+        print("[daily_picks] No active games today.")
         return
 
     batter_df = get_batter_statcast()

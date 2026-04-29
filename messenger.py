@@ -51,13 +51,14 @@ def _format_batter_line(b):
     return f"  \u2022 {b['name']} \u2014 {b['key_edge']}"
 
 
-def send_brief(parcels, pending_count=0, dry_run=False):
+def send_brief(parcels, pending_count=0, started_count=0, dry_run=False):
     """
     Send the morning brief to Telegram.
 
     Args:
         parcels: dict from stack_builder.build_stacks()
         pending_count: number of games with unconfirmed lineups
+        started_count: number of games already in progress (excluded from picks)
         dry_run: if True, print to console instead of sending
     """
     today = date.today().strftime("%B %d, %Y")
@@ -66,7 +67,10 @@ def send_brief(parcels, pending_count=0, dry_run=False):
     lottery = parcels.get("lottery_parlay", [])
     floor = parcels.get("floor_list", [])
 
-    lines = [f"\u26be MLB HR Model \u2014 {today}", ""]
+    lines = [f"\u26be MLB HR Model \u2014 {today}"]
+    if started_count > 0:
+        lines.append(f"\u23f1\ufe0f {started_count} game(s) already started \u2014 excluded from picks")
+    lines.append("")
 
     # Sharp play
     if sharp:

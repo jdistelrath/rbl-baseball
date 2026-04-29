@@ -5,7 +5,7 @@ All network I/O lives here. Other modules never make HTTP calls.
 
 import pickle
 import math
-from datetime import datetime, date
+from datetime import datetime, date, timezone, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -84,6 +84,33 @@ def get_today_schedule(target_date=None):
                 "away_pitcher_name": ap.get("fullName", "TBD"),
             })
     return games
+
+
+def is_game_started(game):
+    """
+    Returns True if the game's scheduled start has already passed (live or final).
+    Uses game['start_time_utc'] (ISO 8601 UTC string from MLB Stats API).
+    Adds a 5-minute grace period — game is considered started 5 min after scheduled start.
+    Returns False if start_time_utc is missing or unparseable.
+    """
+    start_str = game.get("start_time_utc", "")
+    if not start_str:
+        return False
+    try:
+        start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00"))
+        now = datetime.now(timezone.utc)
+        return now > (start_dt + timedelta(minutes=5))
+    except Exception:
+        return False
+
+
+def filter_active_games(games):
+    """Return only games that haven't started yet. Logs how many were filtered."""
+    active = [g for g in games if not is_game_started(g)]
+    filtered = len(games) - len(active)
+    if filtered > 0:
+        print(f"[data_fetcher] Filtered {filtered} started game(s) — {len(active)} active remaining")
+    return active
 
 
 def get_confirmed_lineups(game_id):

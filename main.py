@@ -270,7 +270,19 @@ def _save_draft_projections(games, date_str=None):
 def mode_morning_brief(dry_run=False):
     """Morning brief: full pipeline + send."""
     print("[main] === Morning Brief ===")
-    games = data_fetcher.get_today_schedule()
+    raw_games = data_fetcher.get_today_schedule()
+    games = data_fetcher.filter_active_games(raw_games)
+    started_count = len(raw_games) - len(games)
+
+    if raw_games and not games:
+        msg = "No active games today — all scheduled games have already started."
+        print(f"[main] {msg}")
+        if dry_run:
+            print(msg)
+        else:
+            messenger.send_error(msg)
+        return
+
     parcels, confirmed, pending = _run_pipeline(games, dry_run)
 
     if parcels is None:
@@ -297,7 +309,8 @@ def mode_morning_brief(dry_run=False):
         return
 
     # Send HR brief
-    messenger.send_brief(parcels, pending_count=pending, dry_run=dry_run)
+    messenger.send_brief(parcels, pending_count=pending,
+                         started_count=started_count, dry_run=dry_run)
 
     # Run multi-market EV pipeline (all games, not just confirmed lineups)
     try:
@@ -348,7 +361,7 @@ def mode_followup(dry_run=False):
     print(f"[main] Checking {len(pending_ids)} pending games...")
 
     # Re-fetch schedule to get game info
-    games = data_fetcher.get_today_schedule()
+    games = data_fetcher.filter_active_games(data_fetcher.get_today_schedule())
     pending_games = [g for g in games if g["game_id"] in pending_ids]
 
     if not pending_games:
@@ -449,9 +462,9 @@ def mode_backtest_props():
 def mode_prop_ev():
     """Run HR and K prop EV engines against DK lines, print results to stdout."""
     print("[main] === Prop EV ===")
-    games = data_fetcher.get_today_schedule()
+    games = data_fetcher.filter_active_games(data_fetcher.get_today_schedule())
     if not games:
-        print("[main] No games today.")
+        print("[main] No active games today.")
         return
 
     # Run HR pipeline to get scored batters
@@ -464,9 +477,9 @@ def mode_prop_ev():
 def mode_prop_sweep():
     """Sweep all MLB prop markets, rank by EV, print top 10."""
     print("[main] === Prop Sweep ===")
-    games = data_fetcher.get_today_schedule()
+    games = data_fetcher.filter_active_games(data_fetcher.get_today_schedule())
     if not games:
-        print("[main] No games today.")
+        print("[main] No active games today.")
         return
 
     batter_df = data_fetcher.get_batter_statcast()
