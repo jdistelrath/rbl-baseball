@@ -262,12 +262,14 @@ def project_pitcher(name, team, opponent, pitcher_row):
 # ---------------------------------------------------------------------------
 
 def _tier(fp):
-    if fp > 30:
+    if fp >= 13:
         return "ELITE"
-    if fp >= 20:
+    if fp >= 10:
         return "SOLID"
-    if fp >= 12:
+    if fp >= 8:
         return "VALUE"
+    if fp >= 6:
+        return "FLOOR"
     return "AVOID"
 
 
@@ -389,6 +391,173 @@ def _build_optimal_lineup(players):
     }
 
 
+def save_projections(players, date_str=None):
+    """
+    Save today's player projections to outputs/draft_projections/YYYY-MM-DD.json.
+    Call this once per day at brief time. Skips if file already exists.
+    """
+    from pathlib import Path
+    import json
+    from datetime import date
+
+    date_str = date_str or date.today().isoformat()
+    out_dir = Path(__file__).parent / "outputs" / "draft_projections"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out_path = out_dir / f"{date_str}.json"
+
+    if out_path.exists():
+        return
+
+    with open(out_path, "w") as f:
+        json.dump({
+            "date": date_str,
+            "players": players,
+        }, f, indent=2)
+    print(f"[draft] Projections saved: {out_path}")
+
+
+def _load_projections(date_str):
+    """Load saved projections for a given date, or None if not saved."""
+    from pathlib import Path
+    import json
+
+    p = Path(__file__).parent / "outputs" / "draft_projections" / f"{date_str}.json"
+    if not p.exists():
+        return None
+    try:
+        with open(p, "r") as f:
+            return json.load(f)
+    except Exception as e:
+        print(f"[draft] Failed to load projections for {date_str}: {e}")
+        return None
+
+
+def compare_projections_to_actuals(date_str):
+    """
+    Load saved projections for date_str, fetch actuals, compare.
+    Returns dict with matched players, summary stats, and status.
+    """
+    saved = _load_projections(date_str)
+    if not saved:
+        return {"date": date_str, "status": "no_projections", "players": [], "summary": {}}
+
+    projections = saved.get("players", [])
+    if not projections:
+        return {"date": date_str, "status": "no_projections", "players": [], "summary": {}}
+
+    from data_fetcher import get_draft_actuals
+    actuals = get_draft_actuals(date_str)
+    if not actuals:
+        return {"date": date_str, "status": "no_actuals", "players": [], "summary": {}}
+
+    # Build lookup tables for actuals
+    actuals_by_name = {}
+    actuals_by_lastname = {}
+    for a in actuals:
+        nm = (a.get("name") or "").strip()
+        if not nm:
+            continue
+        actuals_by_name[nm.lower()] = a
+        last = nm.split()[-1].lower() if nm.split() else ""
+        if last:
+            actuals_by_lastname.setdefault(last, []).append(a)
+
+    matched = []
+    used_actual_keys = set()
+
+    for proj in projections:
+        pname = (proj.get("name") or "").strip()
+        if not pname:
+            continue
+        actual = actuals_by_name.get(pname.lower())
+        if actual is None:
+            last = pname.split()[-1].lower() if pname.split() else ""
+            cands = actuals_by_lastname.get(last, [])
+            team = (proj.get("team") or "").lower()
+            for c in cands:
+                if (c.get("team") or "").lower() == team or len(cands) == 1:
+                    actual = c
+                    break
+
+        if actual is None:
+            continue
+
+        akey = id(actual)
+        if akey in used_actual_keys:
+            continue
+        used_actual_keys.add(akey)
+
+        proj_fp = float(proj.get("projected_fp", 0) or 0)
+        actual_fp = float(actual.get("actual_fp", 0) or 0)
+        error = actual_fp - proj_fp
+        pct_error = (error / proj_fp * 100) if proj_fp != 0 else 0.0
+
+        matched.append({
+            "name": pname,
+            "team": proj.get("team", ""),
+            "position": proj.get("position", actual.get("position", "")),
+            "projected_fp": round(proj_fp, 2),
+            "actual_fp": round(actual_fp, 2),
+            "error": round(error, 2),
+            "pct_error": round(pct_error, 1),
+        })
+
+    if len(matched) < 5:
+        return {
+            "date": date_str,
+            "status": "ok",
+            "players": matched,
+            "summary": {"player_count": len(matched)},
+        }
+
+    # Rankings
+    proj_sorted = sorted(matched, key=lambda x: x["projected_fp"], reverse=True)
+    actual_sorted = sorted(matched, key=lambda x: x["actual_fp"], reverse=True)
+    proj_rank = {p["name"]: i + 1 for i, p in enumerate(proj_sorted)}
+    actual_rank = {p["name"]: i + 1 for i, p in enumerate(actual_sorted)}
+
+    for p in matched:
+        rp = proj_rank[p["name"]]
+        ra = actual_rank[p["name"]]
+        p["rank_proj"] = rp
+        p["rank_actual"] = ra
+        p["rank_delta"] = ra - rp
+
+    # Summary
+    n = len(matched)
+    abs_errors = [abs(p["error"]) for p in matched]
+    sq_errors = [p["error"] ** 2 for p in matched]
+    mae = sum(abs_errors) / n
+    rmse = (sum(sq_errors) / n) ** 0.5
+
+    try:
+        from scipy.stats import spearmanr
+        proj_ranks = [p["rank_proj"] for p in matched]
+        actual_ranks = [p["rank_actual"] for p in matched]
+        rho, _ = spearmanr(proj_ranks, actual_ranks)
+        rank_corr = float(rho) if rho == rho else 0.0
+    except Exception:
+        rank_corr = 0.0
+
+    top5_proj = set(p["name"] for p in proj_sorted[:5])
+    top5_actual = set(p["name"] for p in actual_sorted[:5])
+    top5_hits = len(top5_proj & top5_actual)
+    top5_hit_rate = (top5_hits / 5.0) * 100 if top5_proj else 0.0
+
+    return {
+        "date": date_str,
+        "status": "ok",
+        "players": matched,
+        "summary": {
+            "mae": round(mae, 2),
+            "rmse": round(rmse, 2),
+            "rank_corr": round(rank_corr, 3),
+            "top5_hit_rate": round(top5_hit_rate, 1),
+            "player_count": n,
+        },
+    }
+
+
 def build_draft_cheat_sheet(players):
     if not players:
         return {
@@ -407,8 +576,8 @@ def build_draft_cheat_sheet(players):
         "round_1": overall[:4],
         "round_2": overall[4:8],
         "round_3": overall[8:12],
-        "pitchers": pitchers[:5],
-        "if_targets": infielders[:5],
-        "of_targets": outfielders[:5],
+        "pitchers": pitchers[:10],
+        "if_targets": infielders[:10],
+        "of_targets": outfielders[:10],
         "optimal_lineup": _build_optimal_lineup(players),
     }

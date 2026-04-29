@@ -250,6 +250,23 @@ def _run_prop_ev_pipeline(games, parcels, dry_run=False):
 # Modes
 # ---------------------------------------------------------------------------
 
+def _save_draft_projections(games, date_str=None):
+    """Build today's Underdog draft projections and persist for accuracy tracking."""
+    try:
+        from market_underdog_draft import project_all_players, save_projections
+        if not games:
+            return
+        for game in games:
+            if "lineups" not in game:
+                game["lineups"] = data_fetcher.get_confirmed_lineups(game["game_id"])
+        batter_df = data_fetcher.get_batter_statcast()
+        pitcher_df = data_fetcher.get_pitcher_statcast()
+        draft_players = project_all_players(games, batter_df, pitcher_df)
+        save_projections(draft_players, date_str=date_str)
+    except Exception as e:
+        print(f"[main] Draft projection save failed: {e}")
+
+
 def mode_morning_brief(dry_run=False):
     """Morning brief: full pipeline + send."""
     print("[main] === Morning Brief ===")
@@ -269,6 +286,8 @@ def mode_morning_brief(dry_run=False):
                 messenger.send_top_ev_plays(top_ev, dry_run=dry_run)
         except Exception as e:
             print(f"[main] EV pipeline error (non-fatal): {e}")
+        # Save draft projections (pitchers only) so the accuracy file still exists
+        _save_draft_projections(games, date_str="TEST" if dry_run else None)
         # Save state with pending games
         state = _load_state()
         state["lineup_status"] = {
@@ -293,6 +312,9 @@ def mode_morning_brief(dry_run=False):
         _run_prop_ev_pipeline(games, parcels, dry_run=dry_run)
     except Exception as e:
         print(f"[main] Prop EV pipeline error (non-fatal): {e}")
+
+    # Save Underdog draft projections for tomorrow's accuracy comparison
+    _save_draft_projections(games, date_str="TEST" if dry_run else None)
 
     # Update state
     state = _load_state()

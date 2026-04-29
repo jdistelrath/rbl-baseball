@@ -726,6 +726,158 @@ def get_bullpen_stats(season=None):
     return result
 
 
+def get_draft_actuals(date_str):
+    """
+    Pull actual game stats for a given date from MLB Stats API and apply
+    Underdog scoring. Returns list of dicts:
+      {name, team, position, actual_fp, fp_breakdown, game_id}
+    Returns [] gracefully on failure. Cached per-date.
+    """
+    from market_underdog_draft import (
+        classify_position, HITTER_SCORING, PITCHER_SCORING,
+    )
+
+    cache_key = f"actuals_{date_str}"
+    cached = _load_cache(cache_key)
+    if cached is not None:
+        return cached
+
+    schedule_url = (
+        f"https://statsapi.mlb.com/api/v1/schedule"
+        f"?sportId=1&date={date_str}&hydrate=boxscore"
+    )
+    try:
+        resp = requests.get(schedule_url, timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"[data_fetcher] Schedule fetch failed for {date_str}: {e}")
+        return []
+
+    results = []
+
+    for d in data.get("dates", []):
+        for g in d.get("games", []):
+            status = g.get("status", {}).get("abstractGameState", "")
+            if status != "Final":
+                continue
+            game_id = g.get("gamePk")
+            home_name = g.get("teams", {}).get("home", {}).get("team", {}).get("name", "")
+            away_name = g.get("teams", {}).get("away", {}).get("team", {}).get("name", "")
+
+            boxscore = g.get("boxscore")
+            if not boxscore:
+                # Fall back to per-game boxscore endpoint
+                try:
+                    bx_resp = requests.get(
+                        f"https://statsapi.mlb.com/api/v1/game/{game_id}/boxscore",
+                        timeout=15,
+                    )
+                    bx_resp.raise_for_status()
+                    boxscore = bx_resp.json()
+                except Exception as e:
+                    print(f"[data_fetcher] Boxscore fetch failed for {game_id}: {e}")
+                    continue
+
+            for side, team_name in (("home", home_name), ("away", away_name)):
+                team_data = boxscore.get("teams", {}).get(side, {})
+                players = team_data.get("players", {})
+
+                for _, pinfo in players.items():
+                    person = pinfo.get("person", {})
+                    name = person.get("fullName", "")
+                    if not name:
+                        continue
+                    pos_abbr = pinfo.get("position", {}).get("abbreviation", "")
+                    pos_class = classify_position(pos_abbr)
+                    if pos_class is None:
+                        continue
+
+                    stats = pinfo.get("stats", {})
+
+                    if pos_class == "P":
+                        pitch = stats.get("pitching", {}) or {}
+                        ip_str = pitch.get("inningsPitched")
+                        if ip_str is None or ip_str == "":
+                            continue
+                        ip = _safe_ip(ip_str)
+                        if ip <= 0:
+                            continue
+                        so = int(pitch.get("strikeOuts", 0) or 0)
+                        er = int(pitch.get("earnedRuns", 0) or 0)
+                        wins = int(pitch.get("wins", 0) or 0)
+                        qs = 1 if (ip >= 6.0 and er <= 3) else 0
+
+                        ip_fp = ip * PITCHER_SCORING["inning_pitched"]
+                        k_fp = so * PITCHER_SCORING["strikeout"]
+                        er_fp = er * PITCHER_SCORING["earned_run"]
+                        win_fp = wins * PITCHER_SCORING["win"]
+                        qs_fp = qs * PITCHER_SCORING["quality_start"]
+                        total_fp = ip_fp + k_fp + er_fp + win_fp + qs_fp
+
+                        results.append({
+                            "name": name,
+                            "team": team_name,
+                            "position": "P",
+                            "actual_fp": round(total_fp, 2),
+                            "fp_breakdown": {
+                                "ip": round(ip_fp, 2),
+                                "k": round(k_fp, 2),
+                                "er": round(er_fp, 2),
+                                "win": round(win_fp, 2),
+                                "qs": round(qs_fp, 2),
+                            },
+                            "game_id": game_id,
+                        })
+                    else:
+                        bat = stats.get("batting", {}) or {}
+                        ab = int(bat.get("atBats", 0) or 0)
+                        bb_count = int(bat.get("baseOnBalls", 0) or 0)
+                        hbp = int(bat.get("hitByPitch", 0) or 0)
+                        if ab == 0 and bb_count == 0 and hbp == 0:
+                            continue
+                        h = int(bat.get("hits", 0) or 0)
+                        d2 = int(bat.get("doubles", 0) or 0)
+                        t3 = int(bat.get("triples", 0) or 0)
+                        hr = int(bat.get("homeRuns", 0) or 0)
+                        rbi = int(bat.get("rbi", 0) or 0)
+                        runs = int(bat.get("runs", 0) or 0)
+                        sb = int(bat.get("stolenBases", 0) or 0)
+                        singles = max(0, h - d2 - t3 - hr)
+
+                        single_fp = singles * HITTER_SCORING["single"]
+                        double_fp = d2 * HITTER_SCORING["double"]
+                        triple_fp = t3 * HITTER_SCORING["triple"]
+                        hr_fp = hr * HITTER_SCORING["home_run"]
+                        bb_fp = bb_count * HITTER_SCORING["walk"]
+                        hbp_fp = hbp * HITTER_SCORING["hbp"]
+                        rbi_fp = rbi * HITTER_SCORING["rbi"]
+                        run_fp = runs * HITTER_SCORING["run"]
+                        sb_fp = sb * HITTER_SCORING["stolen_base"]
+                        total_fp = (single_fp + double_fp + triple_fp + hr_fp
+                                    + bb_fp + hbp_fp + rbi_fp + run_fp + sb_fp)
+
+                        results.append({
+                            "name": name,
+                            "team": team_name,
+                            "position": pos_class,
+                            "actual_fp": round(total_fp, 2),
+                            "fp_breakdown": {
+                                "hits": round(single_fp + double_fp + triple_fp, 2),
+                                "hr": round(hr_fp, 2),
+                                "walks": round(bb_fp + hbp_fp, 2),
+                                "rbi": round(rbi_fp, 2),
+                                "runs": round(run_fp, 2),
+                                "sb": round(sb_fp, 2),
+                            },
+                            "game_id": game_id,
+                        })
+
+    print(f"[data_fetcher] Loaded {len(results)} actual draft player lines for {date_str}")
+    _save_cache(cache_key, results)
+    return results
+
+
 def get_odds_for_markets(sport="baseball_mlb", markets="h2h,totals,spreads"):
     """
     Pull odds for MLB games from The Odds API.

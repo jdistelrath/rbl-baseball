@@ -257,6 +257,27 @@
     </div>
   </div>
 
+  <div class="card" id="udAccuracyCard">
+    <h2>📊 Yesterday's Accuracy</h2>
+    <div id="udAccuracyStatus" style="color:var(--muted);font-size:0.85rem">Loading…</div>
+    <div id="udAccuracySummary" style="display:none;margin-top:8px;padding:10px;background:rgba(56,139,253,0.08);border-radius:4px;font-family:'SFMono-Regular',Consolas,monospace;font-size:0.85rem;line-height:1.6"></div>
+    <div id="udAccuracyTableWrap" style="display:none;margin-top:12px">
+      <table>
+        <thead><tr>
+          <th data-sort="name" onclick="sortAcc('name')">Player</th>
+          <th data-sort="position" onclick="sortAcc('position')">Pos</th>
+          <th data-sort="projected_fp" onclick="sortAcc('projected_fp')">Proj FP</th>
+          <th data-sort="actual_fp" onclick="sortAcc('actual_fp')">Actual FP</th>
+          <th data-sort="error" onclick="sortAcc('error')">Error</th>
+          <th data-sort="rank_proj" onclick="sortAcc('rank_proj')">Rank Proj</th>
+          <th data-sort="rank_actual" onclick="sortAcc('rank_actual')">Rank Actual</th>
+          <th data-sort="rank_delta" onclick="sortAcc('rank_delta')">Δ Rank</th>
+        </tr></thead>
+        <tbody id="udAccuracyBody"></tbody>
+      </table>
+    </div>
+  </div>
+
   <div class="card" id="udAllCard" style="display:none">
     <h2>Full Player Board</h2>
     <table>
@@ -1231,8 +1252,108 @@ function renderUdTable() {
   }).join('');
 }
 
+/* ---- Draft accuracy ---- */
+let _udAcc = [];
+let _udAccSortKey = 'abs_error';
+let _udAccSortDir = -1;
+
+async function loadDraftAccuracy() {
+  const status = document.getElementById('udAccuracyStatus');
+  const summary = document.getElementById('udAccuracySummary');
+  const tableWrap = document.getElementById('udAccuracyTableWrap');
+  status.textContent = 'Loading…';
+  summary.style.display = 'none';
+  tableWrap.style.display = 'none';
+  try {
+    const resp = await fetch('/api/draft-accuracy');
+    const d = await resp.json();
+    if (d.status === 'error') {
+      status.textContent = 'Error: ' + d.error;
+      return;
+    }
+    if (d.status === 'no_projections') {
+      status.textContent = 'No projections saved yet — accuracy tracking starts today.';
+      return;
+    }
+    if (d.status === 'no_actuals') {
+      status.textContent = 'No actuals available for ' + d.date + ' yet.';
+      return;
+    }
+    const players = d.players || [];
+    const sm = d.summary || {};
+    if (!players.length) {
+      status.textContent = 'No matched players for ' + d.date + '.';
+      return;
+    }
+    status.textContent = '';
+    if (sm.mae !== undefined) {
+      summary.style.display = 'block';
+      summary.innerHTML =
+        '<div style="font-size:0.95rem;font-weight:700;color:var(--blue);margin-bottom:4px">📊 ACCURACY — ' + d.date + '</div>' +
+        '<div>MAE: <b>' + sm.mae + ' FP</b> &nbsp;|&nbsp; ' +
+        'RMSE: <b>' + sm.rmse + ' FP</b> &nbsp;|&nbsp; ' +
+        'Rank Corr: <b>' + sm.rank_corr + '</b></div>' +
+        '<div>Top-5 Hit Rate: <b>' + sm.top5_hit_rate + '%</b> &nbsp;|&nbsp; ' +
+        '<b>' + sm.player_count + '</b> players matched</div>';
+    } else if (sm.player_count !== undefined) {
+      summary.style.display = 'block';
+      summary.innerHTML =
+        '<div>Only ' + sm.player_count + ' player(s) matched — need 5+ for summary stats.</div>';
+    }
+    _udAcc = players.map(p => Object.assign({}, p, { abs_error: Math.abs(p.error || 0) }));
+    _udAccSortKey = 'abs_error';
+    _udAccSortDir = -1;
+    tableWrap.style.display = 'block';
+    renderAccTable();
+  } catch (e) {
+    status.textContent = 'Error: ' + e.message;
+  }
+}
+
+function sortAcc(key) {
+  if (_udAccSortKey === key) { _udAccSortDir = -_udAccSortDir; }
+  else {
+    _udAccSortKey = key;
+    _udAccSortDir = (key === 'name' || key === 'position') ? 1 : -1;
+  }
+  renderAccTable();
+}
+
+function renderAccTable() {
+  const body = document.getElementById('udAccuracyBody');
+  const sorted = [..._udAcc].sort((a, b) => {
+    const va = a[_udAccSortKey], vb = b[_udAccSortKey];
+    if (typeof va === 'string') return (va || '').localeCompare(vb || '') * _udAccSortDir;
+    return ((va || 0) - (vb || 0)) * _udAccSortDir;
+  });
+  body.innerHTML = sorted.map(p => {
+    const err = p.error || 0;
+    let errColor = 'var(--muted)';
+    if (err < -0.001) errColor = 'var(--green)';
+    else if (err > 0.001) errColor = 'var(--red, #f85149)';
+    const errStr = (err >= 0 ? '+' : '') + err.toFixed(2);
+    const rd = p.rank_delta;
+    let rdStr = '—', rdColor = 'var(--muted)';
+    if (rd !== undefined && rd !== null) {
+      rdStr = (rd > 0 ? '+' : '') + rd;
+      if (rd < 0) rdColor = 'var(--green)';
+      else if (rd > 0) rdColor = 'var(--red, #f85149)';
+    }
+    return '<tr>' +
+      '<td><b>' + p.name + '</b> <span style="color:var(--muted);font-size:0.75rem">' + (p.team || '') + '</span></td>' +
+      '<td>' + udPosBadge(p.position || '—') + '</td>' +
+      '<td>' + (p.projected_fp != null ? p.projected_fp.toFixed(1) : '—') + '</td>' +
+      '<td>' + (p.actual_fp != null ? p.actual_fp.toFixed(1) : '—') + '</td>' +
+      '<td style="color:' + errColor + ';font-weight:600">' + errStr + '</td>' +
+      '<td>' + (p.rank_proj != null ? p.rank_proj : '—') + '</td>' +
+      '<td>' + (p.rank_actual != null ? p.rank_actual : '—') + '</td>' +
+      '<td style="color:' + rdColor + ';font-weight:600">' + rdStr + '</td>' +
+      '</tr>';
+  }).join('');
+}
+
 /* ---- Auto-load on page load ---- */
-window.addEventListener('DOMContentLoaded', () => { loadKellyConfig(); loadPicks(); loadParlay(); loadClv(); loadUnderdog(); });
+window.addEventListener('DOMContentLoaded', () => { loadKellyConfig(); loadPicks(); loadParlay(); loadClv(); loadUnderdog(); loadDraftAccuracy(); });
 
 /* ---- Update line options when prop type changes ---- */
 const lineOptions = {

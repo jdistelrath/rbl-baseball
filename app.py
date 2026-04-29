@@ -251,6 +251,25 @@ def api_underdog_draft():
         }), 500
 
 
+@app.route("/api/draft-accuracy")
+def api_draft_accuracy():
+    try:
+        from market_underdog_draft import compare_projections_to_actuals
+        date_str = request.args.get(
+            "date",
+            (date.today() - timedelta(days=1)).isoformat(),
+        )
+        result = compare_projections_to_actuals(date_str)
+        return jsonify(result)
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({
+            "status": "error",
+            "error": str(e),
+            "trace": traceback.format_exc(),
+        }), 500
+
+
 @app.route("/api/backtest_hr", methods=["POST"])
 def api_backtest_hr():
     """Run HR list daily backtest and return JSON results."""
