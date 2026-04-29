@@ -878,6 +878,357 @@ def get_draft_actuals(date_str):
     return results
 
 
+# ---------------------------------------------------------------------------
+# Rolling form / matchup history / pitcher recent / pitch mix (v11)
+# ---------------------------------------------------------------------------
+
+import re
+from datetime import timedelta
+
+
+def _sanitize_cache_key(s):
+    """Reduce a string to alphanum + underscore for use as a cache key fragment."""
+    return re.sub(r"[^A-Za-z0-9_]", "_", (s or "").strip()) or "unknown"
+
+
+def _flip_last_first(name):
+    """Convert 'Last, First' (Statcast format) to 'First Last'. Pass through if no comma."""
+    if not isinstance(name, str) or "," not in name:
+        return name
+    parts = [p.strip() for p in name.split(",", 1)]
+    if len(parts) != 2 or not parts[0] or not parts[1]:
+        return name
+    return f"{parts[1]} {parts[0]}"
+
+
+def get_batter_rolling_stats(days=30):
+    """
+    Pull batter stats for trailing 7/14/30-day windows from pybaseball.
+    Returns {7: df_7, 14: df_14, 30: df_30}. Each df is keyed on Name with derived
+    iso, hr_fb_ratio, hard_hit_pct (proxy via SLG), barrel_rate (proxy via HR/AB power).
+    Each window cached separately. Returns empty DataFrames on failure.
+    """
+    today = date.today()
+    out = {}
+    windows = (7, 14, 30)
+    for w in windows:
+        cache_key = f"batter_rolling_{w}d"
+        cached = _load_cache(cache_key)
+        if cached is not None:
+            out[w] = cached
+            continue
+        end_dt = today.isoformat()
+        start_dt = (today - timedelta(days=w)).isoformat()
+        try:
+            from pybaseball import batting_stats_range
+            raw = batting_stats_range(start_dt, end_dt)
+        except Exception as e:
+            print(f"[data_fetcher] Rolling batting fetch failed ({w}d): {e}")
+            out[w] = pd.DataFrame()
+            _save_cache(cache_key, out[w])
+            continue
+
+        if raw is None or raw.empty:
+            out[w] = pd.DataFrame()
+            _save_cache(cache_key, out[w])
+            continue
+
+        rows = []
+        for _, r in raw.iterrows():
+            try:
+                ab = float(r.get("AB", 0) or 0)
+                pa = float(r.get("PA", 0) or 0)
+                hr = float(r.get("HR", 0) or 0)
+                d2 = float(r.get("2B", 0) or 0)
+                t3 = float(r.get("3B", 0) or 0)
+                ba = float(r.get("BA", 0) or 0)
+                slg = float(r.get("SLG", 0) or 0)
+                ops = float(r.get("OPS", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            if ab <= 0:
+                continue
+            iso_v = max(0.0, slg - ba)
+            hr_fb = hr / max(ab * 0.35, 1.0)
+            extra_base = (d2 + t3 + hr) / ab
+            barrel_proxy = min(0.30, max(0.0, extra_base * 0.45 + (hr / ab) * 0.6))
+            hard_hit_proxy = min(0.65, max(0.20, slg))
+            rows.append({
+                "Name": r.get("Name", ""),
+                "mlbID": r.get("mlbID", 0),
+                "PA": pa,
+                "AB": ab,
+                "HR": hr,
+                "ISO": iso_v,
+                "OPS": ops,
+                "hr_fb_ratio": hr_fb,
+                "barrel_rate": barrel_proxy,
+                "hard_hit_pct": hard_hit_proxy,
+            })
+        df_w = pd.DataFrame(rows)
+        out[w] = df_w
+        _save_cache(cache_key, df_w)
+        print(f"[data_fetcher] Rolling {w}d batting window: {len(df_w)} batters")
+    return out
+
+
+def _resolve_player_id(name):
+    """Find an MLB player ID by full name via the Stats API search endpoint."""
+    if not name:
+        return None
+    cache_key = f"player_id_{_sanitize_cache_key(name)}"
+    cached = _load_cache(cache_key)
+    if cached is not None:
+        return cached or None
+    url = (
+        "https://statsapi.mlb.com/api/v1/people/search"
+        f"?names={requests.utils.quote(name)}&sportId=1"
+    )
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+        people = data.get("people", [])
+        if not people:
+            # Fallback: generic search
+            url2 = (
+                "https://statsapi.mlb.com/api/v1/people/search"
+                f"?names={requests.utils.quote(name)}"
+            )
+            resp2 = requests.get(url2, timeout=10)
+            resp2.raise_for_status()
+            people = resp2.json().get("people", [])
+        if people:
+            pid = people[0].get("id")
+            _save_cache(cache_key, pid)
+            return pid
+    except Exception as e:
+        print(f"[data_fetcher] Player ID lookup failed for {name}: {e}")
+    _save_cache(cache_key, 0)
+    return None
+
+
+def get_batter_pitcher_matchup(batter_name, pitcher_name):
+    """
+    Pull career batter-vs-pitcher H2H stats from MLB Stats API.
+    Returns {pa, hr, hard_contact_rate, avg} or None if <5 PA / not found.
+    """
+    if not batter_name or not pitcher_name:
+        return None
+    cache_key = f"h2h_{_sanitize_cache_key(batter_name)}_{_sanitize_cache_key(pitcher_name)}"
+    cached = _load_cache(cache_key)
+    if cached is not None:
+        # cached can be the dict, or sentinel {} for "not enough data"
+        return cached if cached else None
+
+    batter_id = _resolve_player_id(batter_name)
+    pitcher_id = _resolve_player_id(pitcher_name)
+    if not batter_id or not pitcher_id:
+        _save_cache(cache_key, {})
+        return None
+
+    season = date.today().year
+    url = (
+        "https://statsapi.mlb.com/api/v1/people/"
+        f"{batter_id}/stats?stats=vsPlayer&group=hitting"
+        f"&opposingPlayerId={pitcher_id}&season={season}&sportId=1"
+    )
+    try:
+        resp = requests.get(url, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"[data_fetcher] H2H fetch failed for {batter_name} vs {pitcher_name}: {e}")
+        _save_cache(cache_key, {})
+        return None
+
+    pa = 0
+    hr = 0
+    hits = 0
+    ab = 0
+    for stat_block in data.get("stats", []):
+        for split in stat_block.get("splits", []):
+            stat = split.get("stat", {}) or {}
+            try:
+                pa += int(stat.get("plateAppearances", 0) or 0)
+                hr += int(stat.get("homeRuns", 0) or 0)
+                hits += int(stat.get("hits", 0) or 0)
+                ab += int(stat.get("atBats", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+
+    if pa < 5:
+        _save_cache(cache_key, {})
+        return None
+
+    avg = (hits / ab) if ab > 0 else 0.0
+    # MLB API doesn't expose hard contact directly here -> approximate from AVG
+    hard_contact = min(0.55, max(0.20, avg * 0.9 + 0.10))
+    result = {
+        "pa": pa,
+        "hr": hr,
+        "hard_contact_rate": round(hard_contact, 3),
+        "avg": round(avg, 3),
+    }
+    _save_cache(cache_key, result)
+    return result
+
+
+def get_pitcher_recent_starts(pitcher_name, n=3):
+    """
+    Pull last N starts game log for a pitcher via MLB Stats API.
+    Returns list (most recent first) of {date, ip, hr_allowed, hard_hit_rate, pitches, era_in_start}.
+    Returns [] if not found / on error.
+    """
+    if not pitcher_name or pitcher_name == "TBD":
+        return []
+    cache_key = f"pitcher_starts_{_sanitize_cache_key(pitcher_name)}"
+    cached = _load_cache(cache_key)
+    if cached is not None:
+        return cached
+
+    pitcher_id = _resolve_player_id(pitcher_name)
+    if not pitcher_id:
+        _save_cache(cache_key, [])
+        return []
+
+    season = date.today().year
+    url = (
+        f"https://statsapi.mlb.com/api/v1/people/{pitcher_id}/stats"
+        f"?stats=gameLog&group=pitching&season={season}&sportId=1"
+    )
+    try:
+        resp = requests.get(url, timeout=12)
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        print(f"[data_fetcher] Game log fetch failed for {pitcher_name}: {e}")
+        _save_cache(cache_key, [])
+        return []
+
+    games = []
+    for stat_block in data.get("stats", []):
+        for split in stat_block.get("splits", []):
+            stat = split.get("stat", {}) or {}
+            try:
+                gs = int(stat.get("gamesStarted", 0) or 0)
+            except (TypeError, ValueError):
+                gs = 0
+            if gs <= 0:
+                continue  # skip relief outings
+            ip = _safe_ip(stat.get("inningsPitched", "0"))
+            if ip <= 0:
+                continue
+            try:
+                hr_allowed = int(stat.get("homeRuns", 0) or 0)
+                er = int(stat.get("earnedRuns", 0) or 0)
+                pitches = int(stat.get("numberOfPitches", 0) or 0)
+                hits = int(stat.get("hits", 0) or 0)
+                bb = int(stat.get("baseOnBalls", 0) or 0)
+                bf = int(stat.get("battersFaced", 0) or 0)
+            except (TypeError, ValueError):
+                continue
+            game_date = split.get("date", "")
+            era_in_start = (er * 9.0 / ip) if ip > 0 else 0.0
+            # No hard-hit rate from gameLog -> approximate from (H + 2*HR) / BF
+            if bf > 0:
+                hard_hit_rate = min(0.6, max(0.15, (hits + 2 * hr_allowed) / bf))
+            else:
+                hard_hit_rate = None
+            games.append({
+                "date": game_date,
+                "ip": ip,
+                "hr_allowed": hr_allowed,
+                "hard_hit_rate": hard_hit_rate,
+                "pitches": pitches,
+                "era_in_start": round(era_in_start, 2),
+            })
+
+    games.sort(key=lambda g: g.get("date", ""), reverse=True)
+    result = games[:n]
+    _save_cache(cache_key, result)
+    return result
+
+
+def get_pitcher_pitch_mix(pitcher_name):
+    """
+    Pull pitcher's primary pitch type and usage mix via Statcast arsenal stats.
+    Returns {primary_pitch, primary_pct, pitch_mix: {type: pct}} or None.
+    """
+    if not pitcher_name or pitcher_name == "TBD":
+        return None
+    cache_key = f"pitch_mix_{_sanitize_cache_key(pitcher_name)}"
+    cached = _load_cache(cache_key)
+    if cached is not None:
+        return cached if cached else None
+
+    # Cache the full season arsenal table once per day
+    season = date.today().year
+    arsenal_cache = f"pitcher_arsenal_table_{season}"
+    arsenal_df = _load_cache(arsenal_cache)
+    if arsenal_df is None:
+        try:
+            from pybaseball import statcast_pitcher_arsenal_stats
+            arsenal_df = statcast_pitcher_arsenal_stats(season)
+        except Exception as e:
+            print(f"[data_fetcher] Arsenal stats fetch failed: {e}")
+            arsenal_df = pd.DataFrame()
+        _save_cache(arsenal_cache, arsenal_df)
+
+    if arsenal_df is None or arsenal_df.empty:
+        _save_cache(cache_key, {})
+        return None
+
+    # Resolve display name -> "Last, First" form for matching
+    target = pitcher_name.strip()
+    name_col = "last_name, first_name"
+    if name_col not in arsenal_df.columns:
+        _save_cache(cache_key, {})
+        return None
+
+    def _matches(raw):
+        flipped = _flip_last_first(raw)
+        return isinstance(flipped, str) and flipped.lower() == target.lower()
+
+    rows = arsenal_df[arsenal_df[name_col].apply(_matches)]
+    if rows.empty:
+        # fallback: last-name fuzzy match
+        last = target.split()[-1].lower() if target else ""
+        rows = arsenal_df[arsenal_df[name_col].astype(str).str.lower().str.startswith(last + ",")]
+    if rows.empty:
+        _save_cache(cache_key, {})
+        return None
+
+    pitch_mix = {}
+    for _, row in rows.iterrows():
+        pt = str(row.get("pitch_type", "") or "").upper()
+        try:
+            usage = float(row.get("pitch_usage", 0) or 0)
+        except (TypeError, ValueError):
+            usage = 0.0
+        if not pt:
+            continue
+        pitch_mix[pt] = pitch_mix.get(pt, 0.0) + usage
+
+    if not pitch_mix:
+        _save_cache(cache_key, {})
+        return None
+
+    total = sum(pitch_mix.values()) or 1.0
+    pitch_mix = {k: round(v / total, 3) for k, v in pitch_mix.items()}
+    primary_pitch = max(pitch_mix, key=pitch_mix.get)
+    result = {
+        "primary_pitch": primary_pitch,
+        "primary_pct": pitch_mix[primary_pitch],
+        "pitch_mix": pitch_mix,
+    }
+    _save_cache(cache_key, result)
+    return result
+
+
+# ---------------------------------------------------------------------------
+
+
 def get_odds_for_markets(sport="baseball_mlb", markets="h2h,totals,spreads"):
     """
     Pull odds for MLB games from The Odds API.

@@ -137,6 +137,15 @@ def _build_backtest_dataset(train_years, batting_dfs, pitching_dfs, hr_actuals):
             feats["batting_order_position"] = 0.0
             feats["platoon_factor"] = 1.0
 
+            # v11 features: backtest is season-level, so use season values as proxies
+            feats["barrel_rate_14d"] = feats.get("barrel_rate", 0.065)
+            feats["hard_hit_pct_14d"] = feats.get("hard_hit_pct", 0.35)
+            feats["form_trend"] = 0.0
+            feats["pitcher_recent_hr_per_ip"] = 0.11
+            feats["pitcher_recent_hard_hit"] = 0.35
+            feats["pitcher_high_workload"] = 0.0
+            feats["pitch_type_edge"] = 0.0
+
             # Target: above-median HR rate for the season
             hr_count = actuals.get(bname, 0)
             ab = _safe_float(_get_stat(brow, ["AB", "PA"], 400), 400)
@@ -538,6 +547,15 @@ def run_game_level_backtest(years=None):
             feats["temp_bonus"] = 0.0
             feats["batting_order_position"] = 0.0
             feats["platoon_factor"] = 1.0
+
+            # v11 features: backtest is season-level, so use season values as proxies
+            feats["barrel_rate_14d"] = feats.get("barrel_rate", 0.065)
+            feats["hard_hit_pct_14d"] = feats.get("hard_hit_pct", 0.35)
+            feats["form_trend"] = 0.0
+            feats["pitcher_recent_hr_per_ip"] = 0.11
+            feats["pitcher_recent_hard_hit"] = 0.35
+            feats["pitcher_high_workload"] = 0.0
+            feats["pitch_type_edge"] = 0.0
 
             # Add identity for the scorer
             feats["name"] = str(row.get("batter_name", ""))

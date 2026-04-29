@@ -40,6 +40,13 @@ else:
         "wind_bonus": 1.0,
         "temp_bonus": 1.0,
         "batting_order_position": 1.0,
+        "barrel_rate_14d": 1.2,
+        "hard_hit_pct_14d": 1.0,
+        "form_trend": 0.8,
+        "pitcher_recent_hr_per_ip": 1.2,
+        "pitcher_recent_hard_hit": 0.8,
+        "pitcher_high_workload": 1.0,
+        "pitch_type_edge": 1.0,
     }
 
 
