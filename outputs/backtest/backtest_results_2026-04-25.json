@@ -1,0 +1,81 @@
+{
+  "date": "2026-04-25",
+  "train_years": [
+    2021,
+    2022
+  ],
+  "val_years": [
+    2023
+  ],
+  "test_years": [
+    2024
+  ],
+  "train_brier": 0.11302707880031122,
+  "validation": {
+    "brier": 0.10629204308485951,
+    "roi": {
+      "STRONG": {
+        "bets": 20,
+        "wins": 20,
+        "wagered": 200,
+        "returned": 1000,
+        "roi": 400.0
+      },
+      "STANDARD": {
+        "bets": 47,
+        "wins": 20,
+        "wagered": 235,
+        "returned": 500,
+        "roi": 112.7659574468085
+      },
+      "SPECULATIVE": {
+        "bets": 67,
+        "wins": 0,
+        "wagered": 67,
+        "returned": 0,
+        "roi": -100.0
+      }
+    }
+  },
+  "test": {
+    "brier": 0.10207270280768331,
+    "roi": {
+      "STRONG": {
+        "bets": 19,
+        "wins": 19,
+        "wagered": 190,
+        "returned": 950,
+        "roi": 400.0
+      },
+      "STANDARD": {
+        "bets": 45,
+        "wins": 20,
+        "wagered": 225,
+        "returned": 500,
+        "roi": 122.22222222222223
+      },
+      "SPECULATIVE": {
+        "bets": 65,
+        "wins": 0,
+        "wagered": 65,
+        "returned": 0,
+        "roi": -100.0
+      }
+    }
+  },
+  "weights": {
+    "barrel_rate": 1.2198078765126699,
+    "hr_fb_ratio": 3.556905234991952,
+    "iso": -1.090765988703925,
+    "hard_hit_pct": 0.9363085529748548,
+    "platoon_factor": 1.2450606589508229,
+    "pitcher_hr_fb": 0.9642212633375113,
+    "pitcher_fly_ball_rate": 0.837105804728998,
+    "pitcher_xfip": 1.8505144313570954,
+    "pitcher_hard_hit_allowed": -0.9172799812988802,
+    "park_hr_factor": 1.6436414161822452,
+    "wind_bonus": 1.3909848534724951,
+    "temp_bonus": 1.2340141649952998,
+    "batting_order_position": 0.500596425426459
+  }
+}

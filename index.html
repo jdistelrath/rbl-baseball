@@ -1,0 +1,876 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>RBL Baseball — Analytics Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg-0: #0b0d12;
+  --bg-1: #11141b;
+  --bg-2: #181c25;
+  --bg-3: #232936;
+  --line: #2a2f3d;
+  --text-0: #e8ecf3;
+  --text-1: #a8b0c0;
+  --text-2: #6e7689;
+  --accent: #4dd0e1;
+  --tier-elite: #22c55e;
+  --tier-solid: #3b82f6;
+  --tier-value: #eab308;
+  --tier-floor: #94a3b8;
+  --tier-avoid: #ef4444;
+  --shadow: 0 4px 24px rgba(0,0,0,0.35);
+}
+
+* { box-sizing: border-box; }
+html, body {
+  margin: 0; padding: 0;
+  background: var(--bg-0);
+  color: var(--text-0);
+  font-family: "Inter", -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 14px;
+  line-height: 1.45;
+  min-height: 100vh;
+}
+.mono { font-family: "JetBrains Mono", monospace; }
+
+header {
+  background: linear-gradient(180deg, var(--bg-1) 0%, var(--bg-0) 100%);
+  border-bottom: 1px solid var(--line);
+  padding: 18px 28px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+header h1 {
+  font-size: 20px; margin: 0;
+  letter-spacing: -0.01em;
+}
+header h1 .accent { color: var(--accent); }
+header .meta { color: var(--text-2); font-size: 12px; }
+
+nav.tabs {
+  display: flex;
+  gap: 4px;
+  padding: 0 28px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-1);
+  overflow-x: auto;
+}
+nav.tabs button {
+  background: transparent;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  color: var(--text-1);
+  padding: 14px 18px;
+  font: inherit;
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: color 0.15s, border-color 0.15s;
+}
+nav.tabs button:hover { color: var(--text-0); }
+nav.tabs button.active {
+  color: var(--accent);
+  border-bottom-color: var(--accent);
+}
+
+main { padding: 24px 28px 80px; max-width: 1400px; margin: 0 auto; }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+h2 { font-size: 18px; margin: 0 0 16px; font-weight: 600; }
+h3 { font-size: 14px; margin: 0 0 12px; font-weight: 600; color: var(--text-1); text-transform: uppercase; letter-spacing: 0.04em; }
+
+.toolbar {
+  display: flex; gap: 12px; align-items: center;
+  margin-bottom: 18px; flex-wrap: wrap;
+}
+button.action {
+  background: var(--accent);
+  color: #07171a;
+  border: 0;
+  padding: 9px 18px;
+  font: inherit;
+  font-weight: 600;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: filter 0.15s;
+}
+button.action:hover { filter: brightness(1.1); }
+button.action:disabled { opacity: 0.5; cursor: not-allowed; }
+button.ghost {
+  background: transparent;
+  color: var(--text-0);
+  border: 1px solid var(--line);
+  padding: 8px 14px;
+  border-radius: 6px;
+  font: inherit;
+  cursor: pointer;
+}
+button.ghost:hover { border-color: var(--accent); color: var(--accent); }
+
+input, select {
+  background: var(--bg-2);
+  color: var(--text-0);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 8px 12px;
+  font: inherit;
+}
+input:focus, select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+label { color: var(--text-1); font-size: 12px; display: block; margin-bottom: 4px; }
+
+.card {
+  background: var(--bg-1);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 16px;
+  box-shadow: var(--shadow);
+}
+.grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+
+.player-card {
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--text-2);
+  border-radius: 8px;
+  padding: 10px 14px;
+  margin-bottom: 8px;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 6px 12px;
+  transition: border-color 0.15s;
+}
+.player-card:hover { border-color: var(--accent); }
+.player-card.tier-ELITE { border-left-color: var(--tier-elite); }
+.player-card.tier-SOLID { border-left-color: var(--tier-solid); }
+.player-card.tier-VALUE { border-left-color: var(--tier-value); }
+.player-card.tier-FLOOR { border-left-color: var(--tier-floor); }
+.player-card.tier-AVOID { border-left-color: var(--tier-avoid); }
+
+.player-card .name {
+  font-weight: 600;
+  font-size: 14px;
+}
+.player-card .meta {
+  color: var(--text-2);
+  font-size: 12px;
+}
+.player-card .fp {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 18px;
+  font-weight: 600;
+  text-align: right;
+}
+.player-card .edge {
+  grid-column: 1 / -1;
+  color: var(--text-1);
+  font-size: 12px;
+  font-style: italic;
+  border-top: 1px dashed var(--line);
+  padding-top: 6px;
+  margin-top: 2px;
+}
+
+.tier-badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+.tier-badge.ELITE { background: rgba(34,197,94,0.18); color: var(--tier-elite); }
+.tier-badge.SOLID { background: rgba(59,130,246,0.18); color: var(--tier-solid); }
+.tier-badge.VALUE { background: rgba(234,179,8,0.18); color: var(--tier-value); }
+.tier-badge.FLOOR { background: rgba(148,163,184,0.18); color: var(--tier-floor); }
+.tier-badge.AVOID { background: rgba(239,68,68,0.18); color: var(--tier-avoid); }
+
+.tier-section { margin-top: 16px; }
+.tier-section h4 {
+  font-size: 12px; margin: 0 0 8px;
+  letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--text-1);
+}
+
+.spinner {
+  display: inline-block;
+  width: 18px; height: 18px;
+  border: 2px solid var(--line);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  vertical-align: middle;
+  margin-right: 8px;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.error-box {
+  background: rgba(239,68,68,0.08);
+  border: 1px solid rgba(239,68,68,0.4);
+  color: #fca5a5;
+  padding: 12px 16px;
+  border-radius: 8px;
+  margin: 12px 0;
+}
+
+.empty {
+  color: var(--text-2);
+  font-style: italic;
+  padding: 16px;
+  text-align: center;
+}
+
+.stack-row {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-2);
+  margin-bottom: 6px;
+}
+.stack-row .team-tag {
+  font-family: "JetBrains Mono", monospace;
+  font-weight: 700;
+  background: var(--bg-3);
+  color: var(--accent);
+  padding: 4px 10px;
+  border-radius: 4px;
+  font-size: 12px;
+  min-width: 56px;
+  text-align: center;
+}
+.stack-row .stack-fp {
+  font-family: "JetBrains Mono", monospace;
+  font-weight: 600;
+  margin-left: auto;
+}
+.stack-row .players { color: var(--text-1); font-size: 12px; }
+
+table { width: 100%; border-collapse: collapse; }
+th, td {
+  padding: 8px 10px;
+  text-align: left;
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+}
+th { color: var(--text-2); font-weight: 600; text-transform: uppercase; font-size: 11px; letter-spacing: 0.05em; }
+td.num { text-align: right; font-family: "JetBrains Mono", monospace; }
+
+.status-pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  background: var(--bg-3);
+  color: var(--text-1);
+  margin-left: 8px;
+}
+.status-pill.ml { background: rgba(34,197,94,0.18); color: var(--tier-elite); }
+.status-pill.heuristic { background: rgba(234,179,8,0.18); color: var(--tier-value); }
+
+.parlay-leg {
+  display: flex; align-items: center; gap: 12px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--bg-2);
+  margin-bottom: 6px;
+}
+.parlay-leg input[type=checkbox] { transform: scale(1.2); }
+
+footer {
+  text-align: center;
+  color: var(--text-2);
+  font-size: 12px;
+  padding: 24px;
+  border-top: 1px solid var(--line);
+  margin-top: 40px;
+}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>RBL <span class="accent">Baseball</span> — Analytics Console</h1>
+  <div class="meta mono" id="hdrMeta">v10 · loaded <span id="bootTs"></span></div>
+</header>
+
+<nav class="tabs">
+  <button data-tab="picks" class="active">Daily Picks</button>
+  <button data-tab="backtest">Strategy Backtester</button>
+  <button data-tab="parlay">Parlay Builder</button>
+  <button data-tab="clv">CLV Tracker</button>
+  <button data-tab="draft">Draft</button>
+</nav>
+
+<main>
+
+  <!-- ===================== DAILY PICKS ===================== -->
+  <section id="tab-picks" class="tab-panel active">
+    <h2>Daily Picks</h2>
+    <div class="toolbar">
+      <select id="picksMarket">
+        <option value="all">All Markets</option>
+        <option value="hits">Hits</option>
+        <option value="total_bases">Total Bases</option>
+        <option value="strikeouts">Strikeouts</option>
+        <option value="hr">Home Runs</option>
+      </select>
+      <button class="action" id="picksRun">Refresh Picks</button>
+      <span id="picksStatus" class="status-pill">idle</span>
+    </div>
+    <div class="card">
+      <div id="picksOutput"><div class="empty">No picks loaded yet. Click "Refresh Picks".</div></div>
+    </div>
+  </section>
+
+  <!-- ===================== BACKTEST ===================== -->
+  <section id="tab-backtest" class="tab-panel">
+    <h2>Strategy Backtester</h2>
+    <div class="toolbar">
+      <div>
+        <label>Market</label>
+        <select id="btMarket">
+          <option value="hits">Hits</option>
+          <option value="total_bases">Total Bases</option>
+          <option value="strikeouts">Strikeouts</option>
+          <option value="hr">Home Runs</option>
+        </select>
+      </div>
+      <div>
+        <label>Start date</label>
+        <input type="date" id="btStart" />
+      </div>
+      <div>
+        <label>End date</label>
+        <input type="date" id="btEnd" />
+      </div>
+      <div>
+        <label>&nbsp;</label>
+        <button class="action" id="btRun">Run Backtest</button>
+      </div>
+      <span id="btStatus" class="status-pill">idle</span>
+    </div>
+    <div class="card">
+      <div id="btOutput"><div class="empty">Pick a market and date range, then run.</div></div>
+    </div>
+  </section>
+
+  <!-- ===================== PARLAY ===================== -->
+  <section id="tab-parlay" class="tab-panel">
+    <h2>Parlay Builder</h2>
+    <div class="toolbar">
+      <button class="action" id="parlayLoad">Load Today's Picks</button>
+      <button class="ghost" id="parlayClear">Clear Selection</button>
+      <span id="parlayStatus" class="status-pill">idle</span>
+    </div>
+    <div class="grid-2">
+      <div class="card">
+        <h3>Available Legs</h3>
+        <div id="parlayLegs"><div class="empty">Click "Load Today's Picks" to populate.</div></div>
+      </div>
+      <div class="card">
+        <h3>Parlay Summary</h3>
+        <div id="parlaySummary"><div class="empty">Select legs to build a parlay.</div></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ===================== CLV ===================== -->
+  <section id="tab-clv" class="tab-panel">
+    <h2>CLV Tracker</h2>
+    <div class="toolbar">
+      <button class="action" id="clvLoad">Load CLV History</button>
+      <span id="clvStatus" class="status-pill">idle</span>
+    </div>
+    <div class="card">
+      <div id="clvOutput"><div class="empty">No CLV records loaded.</div></div>
+    </div>
+  </section>
+
+  <!-- ===================== DRAFT ===================== -->
+  <section id="tab-draft" class="tab-panel">
+    <h2>Underdog Draft Optimizer
+      <span id="draftEngineBadge" class="status-pill">—</span>
+    </h2>
+    <div class="toolbar">
+      <button class="action" id="draftRun">Run Draft Analysis</button>
+      <span id="draftStatus" class="status-pill">idle</span>
+      <span id="draftMeta" class="mono" style="color:var(--text-2);font-size:12px"></span>
+    </div>
+
+    <div id="draftError"></div>
+
+    <div class="grid-2">
+      <div class="card">
+        <h3>Pitchers — Ranked</h3>
+        <div id="draftPitchers"><div class="empty">Run the analysis to load pitchers.</div></div>
+      </div>
+      <div class="card">
+        <h3>Hitters — by Tier</h3>
+        <div id="draftHitters"><div class="empty">Run the analysis to load hitters.</div></div>
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:16px">
+      <h3>Stack Recommendations</h3>
+      <div id="draftStacks"><div class="empty">Run the analysis to load stacks.</div></div>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  RBL Baseball Analytics · UD Draft v10 · vanilla JS, no CDN deps beyond Google Fonts.
+</footer>
+
+<script>
+// ---------- Tab switching ----------
+const tabs = document.querySelectorAll("nav.tabs button");
+tabs.forEach(btn => btn.addEventListener("click", () => {
+  tabs.forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  document.querySelectorAll(".tab-panel").forEach(p => p.classList.remove("active"));
+  document.getElementById("tab-" + btn.dataset.tab).classList.add("active");
+}));
+
+document.getElementById("bootTs").textContent = new Date().toISOString().replace("T", " ").slice(0, 19);
+
+// ---------- Helpers ----------
+function el(tag, attrs = {}, ...children) {
+  const e = document.createElement(tag);
+  for (const k in attrs) {
+    if (k === "class") e.className = attrs[k];
+    else if (k === "html") e.innerHTML = attrs[k];
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), attrs[k]);
+    else e.setAttribute(k, attrs[k]);
+  }
+  for (const c of children) {
+    if (c == null) continue;
+    e.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+  }
+  return e;
+}
+
+function setStatus(id, label, kind = "") {
+  const node = document.getElementById(id);
+  node.textContent = label;
+  node.className = "status-pill" + (kind ? " " + kind : "");
+}
+
+function spinner(label = "Loading…") {
+  return el("div", { class: "empty" },
+    el("span", { class: "spinner" }), label);
+}
+
+function showError(containerId, message) {
+  const c = document.getElementById(containerId);
+  c.innerHTML = "";
+  c.appendChild(el("div", { class: "error-box" }, "Error: " + message));
+}
+
+function playerCard(p) {
+  const fpVal = (p.projected_fp ?? 0).toFixed(1);
+  const card = el("div", { class: "player-card tier-" + (p.tier || "FLOOR") });
+  const head = el("div", {},
+    el("span", { class: "name" }, p.name || "—"),
+    el("span", { class: "tier-badge " + (p.tier || "FLOOR") }, p.tier || "—"),
+    el("div", { class: "meta" },
+      [p.team, p.opponent ? "vs " + p.opponent : "", p.lineup_spot ? "#" + p.lineup_spot : "", p.position]
+        .filter(Boolean).join(" · ")
+    )
+  );
+  const fp = el("div", { class: "fp" }, fpVal);
+  card.appendChild(head);
+  card.appendChild(fp);
+  if (p.key_edge && p.key_edge !== "—") {
+    card.appendChild(el("div", { class: "edge" }, p.key_edge));
+  }
+  return card;
+}
+
+// ===================== DAILY PICKS =====================
+function renderPicksTable(out, rows, columns) {
+  if (!rows.length) { out.appendChild(el("div", { class: "empty" }, "No picks available.")); return; }
+  const table = el("table");
+  table.appendChild(el("thead", {}, el("tr", {}, ...columns.map(c => el("th", c.num ? {class:"num"} : {}, c.label)))));
+  const tbody = el("tbody");
+  rows.forEach(p => {
+    tbody.appendChild(el("tr", {}, ...columns.map(c => {
+      const v = c.fn ? c.fn(p) : (p[c.key] ?? "—");
+      return el("td", c.num ? {class:"num"} : {}, String(v));
+    })));
+  });
+  table.appendChild(tbody);
+  out.appendChild(table);
+}
+
+document.getElementById("picksRun").addEventListener("click", async () => {
+  const market = document.getElementById("picksMarket").value;
+  const out = document.getElementById("picksOutput");
+  setStatus("picksStatus", "loading…");
+  out.innerHTML = "";
+  out.appendChild(spinner("Loading picks…"));
+  try {
+    const resp = await fetch("/api/picks");
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const data = await resp.json();
+    out.innerHTML = "";
+
+    // Hits + Total Bases
+    if (market === "all" || market === "hits" || market === "total_bases") {
+      const batters = data.batter_picks || [];
+      const hitsRows = batters.filter(p => p.hits_book);
+      const tbRows = batters.filter(p => p.total_bases_book);
+      if (hitsRows.length) {
+        out.appendChild(el("h3", {}, "Hits 1.5 Over"));
+        renderPicksTable(out, hitsRows, [
+          {label:"Player", key:"name"},
+          {label:"Team", key:"team"},
+          {label:"Opp Pitcher", key:"opp_pitcher"},
+          {label:"Line", key:"hits_line", num:true},
+          {label:"Model", fn:p=>(p.hits_model||0).toFixed(2), num:true},
+          {label:"Edge", fn:p=>((p.hits_edge||0)*100).toFixed(1)+"%", num:true},
+          {label:"Book", key:"hits_book"},
+          {label:"Odds", key:"hits_price", num:true},
+          {label:"Kelly", fn:p=>((p.hits_kelly_frac||0)*100).toFixed(1)+"%", num:true},
+        ]);
+      }
+      if (tbRows.length) {
+        out.appendChild(el("h3", {}, "Total Bases 2.5 Over"));
+        renderPicksTable(out, tbRows, [
+          {label:"Player", key:"name"},
+          {label:"Team", key:"team"},
+          {label:"Opp Pitcher", key:"opp_pitcher"},
+          {label:"Line", key:"total_bases_line", num:true},
+          {label:"Model", fn:p=>(p.tb_proj||0).toFixed(2), num:true},
+          {label:"Edge", fn:p=>((p.total_bases_edge||0)*100).toFixed(1)+"%", num:true},
+          {label:"Book", key:"total_bases_book"},
+          {label:"Odds", key:"total_bases_price", num:true},
+          {label:"Kelly", fn:p=>((p.total_bases_kelly_frac||0)*100).toFixed(1)+"%", num:true},
+        ]);
+      }
+    }
+
+    // HR
+    if (market === "all" || market === "hr") {
+      const hrRows = data.hr_list || [];
+      if (hrRows.length) {
+        out.appendChild(el("h3", {}, "Home Runs"));
+        renderPicksTable(out, hrRows, [
+          {label:"Player", key:"name"},
+          {label:"Team", key:"team"},
+          {label:"HR Prob", fn:p=>((p.hr_prob||0)*100).toFixed(1)+"%", num:true},
+        ]);
+      }
+    }
+
+    // Strikeouts
+    if (market === "all" || market === "strikeouts") {
+      const kRows = data.k_picks || [];
+      if (kRows.length) {
+        out.appendChild(el("h3", {}, "Strikeouts"));
+        renderPicksTable(out, kRows, [
+          {label:"Pitcher", key:"name"},
+          {label:"Team", key:"team"},
+          {label:"Opponent", key:"opponent"},
+          {label:"Proj K", fn:p=>(p.proj_k||0).toFixed(1), num:true},
+          {label:"K/9", fn:p=>(p.k9||0).toFixed(1), num:true},
+          {label:"ERA", fn:p=>(p.era||0).toFixed(2), num:true},
+          {label:"Opp K%", fn:p=>((p.opp_k_rate||0)*100).toFixed(1)+"%", num:true},
+          {label:"Edge", fn:p=>((p.edge||0)*100).toFixed(1)+"%", num:true},
+          {label:"Book", key:"book"},
+          {label:"Kelly", fn:p=>((p.kelly_frac||0)*100).toFixed(1)+"%", num:true},
+          {label:"Note", key:"note"},
+        ]);
+      }
+    }
+
+    const total = (data.batter_picks||[]).length + (data.k_picks||[]).length;
+    setStatus("picksStatus", total + " players", "ml");
+  } catch (e) {
+    showError("picksOutput", e.message);
+    setStatus("picksStatus", "error");
+  }
+});
+
+// ===================== BACKTEST =====================
+(function initBacktestDates() {
+  const today = new Date();
+  const past = new Date(today);
+  past.setDate(today.getDate() - 30);
+  document.getElementById("btStart").value = past.toISOString().slice(0, 10);
+  document.getElementById("btEnd").value = today.toISOString().slice(0, 10);
+})();
+
+document.getElementById("btRun").addEventListener("click", async () => {
+  const market = document.getElementById("btMarket").value;
+  const start = document.getElementById("btStart").value;
+  const end = document.getElementById("btEnd").value;
+  const out = document.getElementById("btOutput");
+  setStatus("btStatus", "running…");
+  out.innerHTML = "";
+  out.appendChild(spinner("Backtest in progress…"));
+  try {
+    const params = new URLSearchParams({ market, start, end });
+    const resp = await fetch("/api/backtest", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(Object.fromEntries(params))});
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const data = await resp.json();
+    out.innerHTML = "";
+    const summary = data.summary || data;
+    const stats = el("div", { class: "grid-2" });
+    const card1 = el("div", { class: "card" },
+      el("h3", {}, "Performance"),
+      el("table", {}, el("tbody", {},
+        el("tr", {}, el("td", {}, "Bets"), el("td", { class: "num" }, String(summary.bets ?? summary.n ?? "—"))),
+        el("tr", {}, el("td", {}, "Win rate"), el("td", { class: "num" }, ((summary.win_rate ?? 0) * 100).toFixed(1) + "%")),
+        el("tr", {}, el("td", {}, "ROI"), el("td", { class: "num" }, ((summary.roi ?? 0) * 100).toFixed(1) + "%")),
+        el("tr", {}, el("td", {}, "Net units"), el("td", { class: "num" }, (summary.net_units ?? 0).toFixed(2)))
+      )));
+    const card2 = el("div", { class: "card" },
+      el("h3", {}, "Configuration"),
+      el("table", {}, el("tbody", {},
+        el("tr", {}, el("td", {}, "Market"), el("td", {}, market)),
+        el("tr", {}, el("td", {}, "Start"), el("td", {}, start)),
+        el("tr", {}, el("td", {}, "End"), el("td", {}, end))
+      )));
+    stats.appendChild(card1);
+    stats.appendChild(card2);
+    out.appendChild(stats);
+    setStatus("btStatus", "done", "ml");
+  } catch (e) {
+    showError("btOutput", e.message);
+    setStatus("btStatus", "error");
+  }
+});
+
+// ===================== PARLAY =====================
+let parlayPool = [];
+let parlaySelected = new Set();
+
+document.getElementById("parlayLoad").addEventListener("click", async () => {
+  const out = document.getElementById("parlayLegs");
+  setStatus("parlayStatus", "loading…");
+  out.innerHTML = "";
+  out.appendChild(spinner());
+  try {
+    const resp = await fetch("/api/picks");
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const data = await resp.json();
+    parlayPool = data.picks || data.results || [];
+    out.innerHTML = "";
+    if (!parlayPool.length) {
+      out.appendChild(el("div", { class: "empty" }, "No legs available."));
+    } else {
+      parlayPool.forEach((p, i) => {
+        const id = "leg-" + i;
+        const row = el("div", { class: "parlay-leg" });
+        const cb = el("input", { type: "checkbox", id });
+        cb.addEventListener("change", () => {
+          if (cb.checked) parlaySelected.add(i); else parlaySelected.delete(i);
+          recomputeParlay();
+        });
+        row.appendChild(cb);
+        row.appendChild(el("label", { for: id },
+          (p.player || p.name || "—") + " — " + (p.market || "?") +
+          " " + (p.line ?? "") + "  (" + ((p.ev_pct ?? p.ev ?? 0)).toFixed(1) + "% EV)"
+        ));
+        out.appendChild(row);
+      });
+    }
+    setStatus("parlayStatus", parlayPool.length + " legs", "ml");
+  } catch (e) {
+    showError("parlayLegs", e.message);
+    setStatus("parlayStatus", "error");
+  }
+});
+
+document.getElementById("parlayClear").addEventListener("click", () => {
+  parlaySelected.clear();
+  document.querySelectorAll("#parlayLegs input[type=checkbox]").forEach(cb => cb.checked = false);
+  recomputeParlay();
+});
+
+async function recomputeParlay() {
+  const sumNode = document.getElementById("parlaySummary");
+  if (parlaySelected.size === 0) {
+    sumNode.innerHTML = "<div class='empty'>Select legs to build a parlay.</div>";
+    return;
+  }
+  const legs = Array.from(parlaySelected).map(i => parlayPool[i]);
+  sumNode.innerHTML = "";
+  sumNode.appendChild(spinner("Computing combined EV…"));
+  try {
+    const resp = await fetch("/api/parlay_builder", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ legs })
+    });
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const data = await resp.json();
+    sumNode.innerHTML = "";
+    sumNode.appendChild(el("table", {}, el("tbody", {},
+      el("tr", {}, el("td", {}, "Legs"), el("td", { class: "num" }, String(legs.length))),
+      el("tr", {}, el("td", {}, "Combined odds"), el("td", { class: "num" }, String(data.combined_odds ?? "—"))),
+      el("tr", {}, el("td", {}, "Combined EV%"), el("td", { class: "num" }, ((data.ev_pct ?? data.ev ?? 0)).toFixed(2) + "%")),
+      el("tr", {}, el("td", {}, "Hit prob"), el("td", { class: "num" }, ((data.hit_prob ?? 0) * 100).toFixed(2) + "%"))
+    )));
+  } catch (e) {
+    sumNode.innerHTML = "";
+    sumNode.appendChild(el("div", { class: "error-box" }, "Parlay calc failed: " + e.message));
+  }
+}
+
+// ===================== CLV =====================
+document.getElementById("clvLoad").addEventListener("click", async () => {
+  const out = document.getElementById("clvOutput");
+  setStatus("clvStatus", "loading…");
+  out.innerHTML = "";
+  out.appendChild(spinner());
+  try {
+    const resp = await fetch("/api/clv_data");
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const data = await resp.json();
+    out.innerHTML = "";
+    const rows = data.records || data.history || [];
+    if (!rows.length) {
+      out.appendChild(el("div", { class: "empty" }, "No CLV records yet."));
+    } else {
+      const tbl = el("table");
+      tbl.appendChild(el("thead", {}, el("tr", {},
+        el("th", {}, "Date"), el("th", {}, "Player"), el("th", {}, "Market"),
+        el("th", { class: "num" }, "Bet odds"),
+        el("th", { class: "num" }, "Close odds"),
+        el("th", { class: "num" }, "CLV%")
+      )));
+      const tb = el("tbody");
+      rows.forEach(r => {
+        tb.appendChild(el("tr", {},
+          el("td", {}, r.date || ""),
+          el("td", {}, r.player || r.name || ""),
+          el("td", {}, r.market || ""),
+          el("td", { class: "num" }, String(r.bet_odds ?? "—")),
+          el("td", { class: "num" }, String(r.close_odds ?? "—")),
+          el("td", { class: "num" }, ((r.clv_pct ?? 0)).toFixed(2) + "%")
+        ));
+      });
+      tbl.appendChild(tb);
+      out.appendChild(tbl);
+    }
+    setStatus("clvStatus", rows.length + " records", "ml");
+  } catch (e) {
+    showError("clvOutput", e.message);
+    setStatus("clvStatus", "error");
+  }
+});
+
+// ===================== DRAFT =====================
+async function refreshDraftStatus() {
+  try {
+    const resp = await fetch("/api/draft-status");
+    if (!resp.ok) return;
+    const s = await resp.json();
+    const eng = s.engine_active || "—";
+    const badge = document.getElementById("draftEngineBadge");
+    badge.textContent = eng.toUpperCase();
+    badge.className = "status-pill " + (eng === "ml" ? "ml" : "heuristic");
+  } catch (e) { /* ignore — status endpoint optional */ }
+}
+refreshDraftStatus();
+
+document.getElementById("draftRun").addEventListener("click", async () => {
+  const errBox = document.getElementById("draftError");
+  errBox.innerHTML = "";
+  setStatus("draftStatus", "running…");
+  document.getElementById("draftPitchers").innerHTML = "";
+  document.getElementById("draftPitchers").appendChild(spinner("Projecting pitchers…"));
+  document.getElementById("draftHitters").innerHTML = "";
+  document.getElementById("draftHitters").appendChild(spinner("Projecting hitters…"));
+  document.getElementById("draftStacks").innerHTML = "";
+  document.getElementById("draftStacks").appendChild(spinner("Building stacks…"));
+
+  try {
+    const resp = await fetch("/api/underdog-draft");
+    if (!resp.ok) throw new Error("HTTP " + resp.status);
+    const data = await resp.json();
+    if (data.status !== "ok") throw new Error(data.error || "API returned non-ok status");
+
+    const projections = data.projections || [];
+    const cheat = data.cheat_sheet || {};
+    const pitchers = projections.filter(p => p.position === "P")
+                                .sort((a, b) => b.projected_fp - a.projected_fp);
+    const hitters = projections.filter(p => p.position === "IF" || p.position === "OF");
+
+    // Pitchers column
+    const pNode = document.getElementById("draftPitchers");
+    pNode.innerHTML = "";
+    if (!pitchers.length) {
+      pNode.appendChild(el("div", { class: "empty" }, "No pitcher projections."));
+    } else {
+      pitchers.forEach(p => pNode.appendChild(playerCard(p)));
+    }
+
+    // Hitters column — bucketed by tier
+    const hNode = document.getElementById("draftHitters");
+    hNode.innerHTML = "";
+    const buckets = { ELITE: [], SOLID: [], VALUE: [], FLOOR: [], AVOID: [] };
+    hitters.forEach(h => {
+      (buckets[h.tier] || buckets.FLOOR).push(h);
+    });
+    ["ELITE", "SOLID", "VALUE", "FLOOR", "AVOID"].forEach(tier => {
+      const list = buckets[tier].sort((a, b) => b.projected_fp - a.projected_fp);
+      if (!list.length) return;
+      const section = el("div", { class: "tier-section" },
+        el("h4", {}, tier + " · " + list.length));
+      list.forEach(p => section.appendChild(playerCard(p)));
+      hNode.appendChild(section);
+    });
+    if (!hitters.length) {
+      hNode.appendChild(el("div", { class: "empty" }, "No hitter projections."));
+    }
+
+    // Stacks
+    const sNode = document.getElementById("draftStacks");
+    sNode.innerHTML = "";
+    const stacks = cheat.stack_recommendations || [];
+    if (!stacks.length) {
+      sNode.appendChild(el("div", { class: "empty" }, "No stack recommendations."));
+    } else {
+      stacks.forEach(s => {
+        const players = (s.players || []).map(p =>
+          (p.name || "?") + " (#" + (p.lineup_spot || "?") + ", " + (p.projected_fp || 0).toFixed(1) + ")"
+        ).join("  ·  ");
+        sNode.appendChild(el("div", { class: "stack-row" },
+          el("div", { class: "team-tag" }, s.team || "—"),
+          el("div", { class: "players" }, players),
+          el("div", { class: "stack-fp" }, (s.stack_fp || 0).toFixed(1) + " FP")
+        ));
+      });
+    }
+
+    setStatus("draftStatus", projections.length + " players", data.engine === "ml" ? "ml" : "heuristic");
+    document.getElementById("draftMeta").textContent =
+      "engine=" + data.engine + " · " + data.duration_ms + "ms";
+    refreshDraftStatus();
+  } catch (e) {
+    document.getElementById("draftPitchers").innerHTML = "";
+    document.getElementById("draftHitters").innerHTML = "";
+    document.getElementById("draftStacks").innerHTML = "";
+    errBox.appendChild(el("div", { class: "error-box" },
+      "Draft analysis failed: " + e.message));
+    setStatus("draftStatus", "error");
+  }
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+bet_sizing:
+  high_confidence: 10   # $ amount
+  standard: 5
+  lottery: 1
+
+brief_times:
+  morning: "10:50"      # ET
+  followup: "13:00"     # ET
+
+lineup_check_interval_minutes: 10
+lineup_check_window:
+  start: "09:00"
+  end: "14:00"
+
+parlay:
+  sharp_legs: 3
+  lottery_legs: 6
+  target_pitchers_per_day: 3
+  batters_per_stack: 4
+
+backtesting:
+  start_year: 2021
+  end_year: 2024        # leave 2025 as holdout
+  holdout_year: 2025
